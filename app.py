@@ -1,6 +1,5 @@
 import streamlit as st
-import tempfile, os, glob, re, sys, io, pickle
-from pathlib import Path
+import tempfile, os, glob, re, sys, io, pickle, importlib
 
 st.set_page_config(
     page_title="FAR Extraction Pipeline",
@@ -8,10 +7,23 @@ st.set_page_config(
     layout="wide",
 )
 
+# ── Import run_rules at startup so errors surface immediately ──────────────────
+try:
+    import run_rules as rr
+    _import_ok = True
+except Exception as _e:
+    _import_ok = False
+    _import_err = str(_e)
+
+if not _import_ok:
+    st.error(f"❌ Failed to load run_rules.py: {_import_err}")
+    st.stop()
+
+# ── Page ───────────────────────────────────────────────────────────────────────
 st.title("📄 Faculty Annual Report Extraction Pipeline")
 st.caption("Upload FAR PDFs, CV PDFs, and supplemental XLSX files to extract structured data into Excel.")
 
-# ── Sidebar: settings ──────────────────────────────────────────────────────────
+# ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("⚙️ Settings")
     api_key = st.text_input(
@@ -22,25 +34,27 @@ with st.sidebar:
     output_filename = st.text_input("Output filename", value="far_extraction_output.xlsx")
     st.markdown("---")
     st.markdown("**Expected file naming:**")
-    st.markdown("- FAR PDF: `F180Vita_F.Lastname.pdf`")
-    st.markdown("- CV PDF: `Lastname CV.pdf`")
-    st.markdown("- Supplemental XLSX: `Lastname.xlsx`")
-    st.markdown("- Support staff XLSX: `support_staff.xlsx`")
+    st.code(
+        "F180Vita_F.Lastname.pdf   ← FAR\n"
+        "Lastname CV.pdf           ← CV\n"
+        "Lastname.xlsx             ← Supplemental\n"
+        "support_staff.xlsx        ← Staff",
+        language=None,
+    )
 
-# ── File upload ────────────────────────────────────────────────────────────────
+# ── Upload ─────────────────────────────────────────────────────────────────────
 st.subheader("1. Upload Files")
 uploaded_files = st.file_uploader(
-    "Upload all files (FAR PDFs, CV PDFs, XLSX files)",
+    "Upload all files (FAR PDFs, CV PDFs, XLSX files) — select all at once",
     accept_multiple_files=True,
     type=["pdf", "xlsx", "xls"],
-    help="You can select all files at once. Mix of FAR PDFs, CV PDFs, and supplemental workbooks.",
 )
 
 if uploaded_files:
     st.success(f"✅ {len(uploaded_files)} file(s) uploaded")
-    with st.expander("Uploaded files", expanded=False):
+    with st.expander("Show uploaded files"):
         for f in uploaded_files:
-            st.text(f"  {f.name}  ({f.size/1024:.1f} KB)")
+            st.text(f"{f.name}  ({f.size/1024:.1f} KB)")
 
 # ── Faculty selection ──────────────────────────────────────────────────────────
 st.subheader("2. Select Faculty")
@@ -53,7 +67,7 @@ specific_names = ""
 if run_mode == "Specific faculty only":
     specific_names = st.text_input(
         "Last names (comma-separated)",
-        placeholder="e.g. Narayanan, Palermo, Qian",
+        placeholder="e.g.  Narayanan, Palermo, Qian",
     )
 
 # ── Run ────────────────────────────────────────────────────────────────────────
@@ -62,22 +76,11 @@ run_btn = st.button("▶ Run Extraction", type="primary", disabled=not uploaded_
 
 if run_btn and uploaded_files:
     with tempfile.TemporaryDirectory() as tmpdir:
+
         # Save uploaded files to temp dir
         for uf in uploaded_files:
-            dest = os.path.join(tmpdir, uf.name)
-            with open(dest, "wb") as fh:
+            with open(os.path.join(tmpdir, uf.name), "wb") as fh:
                 fh.write(uf.getbuffer())
-
-        # Add run_rules to path (must be in same folder as app.py)
-        app_dir = os.path.dirname(os.path.abspath(__file__))
-        if app_dir not in sys.path:
-            sys.path.insert(0, app_dir)
-
-        try:
-            import run_rules as rr
-        except ImportError:
-            st.error("❌ `run_rules.py` not found. Make sure it is in the same folder as `app.py`.")
-            st.stop()
 
         # Determine faculty list
         if run_mode == "All detected faculty":
@@ -86,49 +89,34 @@ if run_btn and uploaded_files:
                 m = re.match(r'F180Vita_\w+\.(\w+)\.pdf', os.path.basename(fp))
                 if m and m.group(1) not in faculty_list:
                     faculty_list.append(m.group(1))
+            # Keep only faculty whose FAR was actually uploaded
+            faculty_list = [
+                ln for ln in faculty_list
+                if glob.glob(os.path.join(tmpdir, f"F180Vita_*.{ln}.pdf"))
+            ]
         else:
             faculty_list = [n.strip() for n in specific_names.split(",") if n.strip()]
 
         if not faculty_list:
-            st.warning("No faculty to process. Check uploaded file names or enter last names above.")
+            st.warning("⚠️ No faculty detected. Check that FAR PDFs follow the naming pattern `F180Vita_F.Lastname.pdf`.")
             st.stop()
 
-        # Pre-pass: build all_far_data with pickle cache
-        cache_path = os.path.join(app_dir, ".far_cache.pkl")
-        try:
-            with open(cache_path, "rb") as cf:
-                _cache = pickle.load(cf)
-        except Exception:
-            _cache = {}
+        st.info(f"Found {len(faculty_list)} faculty to process: {', '.join(faculty_list)}")
 
+        # Pre-pass: build all_far_data (no disk cache on Streamlit Cloud)
         all_far_data = {}
-        _cache_dirty = False
-        for far_path in glob.glob(os.path.join(tmpdir, "F180Vita_*.pdf")):
-            m = re.match(r'F180Vita_\w+\.(\w+)\.pdf', os.path.basename(far_path))
-            if not m:
-                continue
-            ln = m.group(1)
-            try:
-                mtime = os.path.getmtime(far_path)
-                cache_key = (far_path, mtime)
-                if cache_key in _cache:
-                    all_far_data[ln] = _cache[cache_key]
-                else:
-                    parsed = (rr.parse_far(far_path), rr.pdf_full_text(far_path))
-                    all_far_data[ln] = parsed
-                    _cache[cache_key] = parsed
-                    _cache_dirty = True
-            except Exception:
-                pass
+        with st.spinner("Pre-parsing FAR PDFs for cross-referencing…"):
+            for far_path in glob.glob(os.path.join(tmpdir, "F180Vita_*.pdf")):
+                m = re.match(r'F180Vita_\w+\.(\w+)\.pdf', os.path.basename(far_path))
+                if not m:
+                    continue
+                ln = m.group(1)
+                try:
+                    all_far_data[ln] = (rr.parse_far(far_path), rr.pdf_full_text(far_path))
+                except Exception as e:
+                    st.warning(f"Could not pre-parse {os.path.basename(far_path)}: {e}")
 
-        if _cache_dirty:
-            try:
-                with open(cache_path, "wb") as cf:
-                    pickle.dump(_cache, cf)
-            except Exception:
-                pass
-
-        # Process each faculty with live progress
+        # Process each faculty
         st.markdown("---")
         st.subheader("Results")
         progress = st.progress(0, text="Starting…")
@@ -137,13 +125,12 @@ if run_btn and uploaded_files:
         log_lines = []
 
         for i, last_name in enumerate(faculty_list):
-            progress.progress((i) / len(faculty_list), text=f"Processing {last_name}…")
-            log_lines.append(f"⏳ Processing **{last_name}**…")
+            progress.progress(i / len(faculty_list), text=f"Processing {last_name}…")
+            log_lines.append(f"⏳ **{last_name}**…")
             log_area.markdown("\n\n".join(log_lines))
 
-            # Capture stdout from extract_faculty
             old_stdout = sys.stdout
-            sys.stdout = buf = io.StringIO()
+            sys.stdout = io.StringIO()
             try:
                 r = rr.extract_faculty(
                     last_name,
@@ -153,7 +140,7 @@ if run_btn and uploaded_files:
                 )
             except Exception as e:
                 r = None
-                log_lines[-1] = f"❌ **{last_name}** — error: {e}"
+                log_lines[-1] = f"❌ **{last_name}** — {e}"
             finally:
                 sys.stdout = old_stdout
 
@@ -161,7 +148,7 @@ if run_btn and uploaded_files:
                 results.append(r)
                 log_lines[-1] = (
                     f"✅ **{last_name}** — "
-                    f"UG={r['ug']} Grad={r['grad']} MS={r['ms']} PhD={r['phd']} "
+                    f"UG={r['ug']} Grad={r['grad']} MS={r['ms']} PhD={r['phd']} | "
                     f"Grants={r['grants']} CH/CO={r['ch_co']} CP={r['cp']} Journal={r['journal']}"
                 )
             log_area.markdown("\n\n".join(log_lines))
@@ -169,40 +156,36 @@ if run_btn and uploaded_files:
         progress.progress(1.0, text="Done!")
 
         if not results:
-            st.error("No results produced. Check that FAR PDFs match the expected naming pattern.")
+            st.error("No results produced. Check file naming and try again.")
             st.stop()
 
-        # Generate Excel in memory
+        # Generate Excel
         out_path = os.path.join(tmpdir, output_filename)
         rr.generate_excel(results, out_path)
-
         with open(out_path, "rb") as fh:
             excel_bytes = fh.read()
 
         # Summary table
         st.markdown("---")
-        st.subheader("Summary")
+        st.subheader("📊 Summary")
         import pandas as pd
-        rows = []
-        for r in results:
-            rows.append({
-                "Last Name":  r["last_name"],
-                "First Name": r["first_name"],
-                "Title":      r["title"],
-                "UG":         r["ug"],
-                "Grad":       r["grad"],
-                "MS":         r["ms"],
-                "PhD":        r["phd"],
-                "Grants":     r["grants"],
-                "CH/CO":      r["ch_co"],
-                "CP":         r["cp"],
-                "Journal":    r["journal"],
-            })
+        rows = [{
+            "Last Name":  r["last_name"],
+            "First Name": r["first_name"],
+            "Title":      r["title"],
+            "UG":         r["ug"],
+            "Grad":       r["grad"],
+            "MS":         r["ms"],
+            "PhD":        r["phd"],
+            "Grants":     r["grants"],
+            "CH/CO":      r["ch_co"],
+            "CP":         r["cp"],
+            "Journal":    r["journal"],
+        } for r in results]
         st.dataframe(pd.DataFrame(rows).set_index("Last Name"), use_container_width=True)
 
-        # Download button
         st.download_button(
-            label=f"⬇️ Download {output_filename}",
+            label=f"⬇️  Download {output_filename}",
             data=excel_bytes,
             file_name=output_filename,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
