@@ -84,7 +84,8 @@ if run_btn and uploaded_files:
 
         # Determine faculty list
         if run_mode == "All detected faculty":
-            faculty_list = list(rr.KNOWN_FACULTY)
+            _known = getattr(rr, 'KNOWN_FACULTY', ['Narayanan', 'Qian', 'Palermo', 'Hu', 'Duffield'])
+            faculty_list = list(_known)
             for fp in glob.glob(os.path.join(tmpdir, "F180Vita_*.pdf")):
                 m = re.match(r'F180Vita_\w+\.(\w+)\.pdf', os.path.basename(fp))
                 if m and m.group(1) not in faculty_list:
