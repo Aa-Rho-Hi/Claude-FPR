@@ -1,5 +1,5 @@
 import streamlit as st
-import tempfile, os, glob, re, sys, io, importlib
+import tempfile, os, glob, re, sys, io
 from datetime import date
 
 st.set_page_config(
@@ -19,20 +19,44 @@ if not _import_ok:
     st.error(f"❌ Failed to load run_rules.py: {_import_err}")
     st.stop()
 
-# ── Title ──────────────────────────────────────────────────────────────────────
-st.title("📄 Faculty Annual Report Extraction Pipeline")
-st.caption("Upload FAR PDFs, CV PDFs, and supplemental XLSX files to extract structured data into Excel.")
+# ── Default rule editor text ───────────────────────────────────────────────────
+DEFAULT_RULES_TEXT = """\
+# ─────────────────────────────────────────────────────────────────────────────
+# STANDARD RULES  (always applied — edit descriptions for reference only)
+# ─────────────────────────────────────────────────────────────────────────────
+
+UG Courses       | Counts distinct undergrad course numbers (below the UG ceiling) taught this year.
+Grad Courses     | Counts distinct graduate course numbers (at or above the UG ceiling) taught this year.
+MS Graduated     | Counts MS/MEN students who graduated this year with faculty as chair.
+PhD Graduated    | Counts PhD students who graduated this year with faculty as chair.
+Grants           | Counts funded-in-progress PI/CoPI grants that started this year and are active through Q4.
+CH/CO            | Counts active graduate chair/co-chair advisees (ongoing + current CV members).
+CP               | Counts conference papers published this year (best of FAR, CV, and supplemental).
+Journal          | Counts refereed journal papers published this year (best of CV and supplemental).
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CUSTOM RULES  (add your own below — one rule per line)
+# Format:  Column Name  |  Section in CV to search  |  Keyword to count
+#
+# • Column Name   — label that appears in the output Excel
+# • Section       — heading in the CV where the pipeline should look
+#                   (leave blank to search the entire CV)
+# • Keyword       — any line containing this word is counted
+#
+# Examples (remove the leading # to activate):
+# ─────────────────────────────────────────────────────────────────────────────
+# Invited Talks   | Invited Talks              | invited
+# Book Chapters   | Book Chapters              | chapter
+# Patents         | Patents                    | patent
+# Awards          | Honors and Awards          | award
+# Editorials      | Editorial                  | editor
+# Media Coverage  | Media                      | coverage
+"""
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("⚙️ Settings")
-    api_key = st.text_input(
-        "LlamaParse API Key (optional)",
-        type="password",
-        help="Only needed if the pipeline uses LlamaParse for OCR fallback.",
-    )
     output_filename = st.text_input("Output filename", value="far_extraction_output.xlsx")
-
     st.markdown("---")
     st.markdown("**Expected file naming:**")
     st.code(
@@ -44,7 +68,7 @@ with st.sidebar:
     )
 
 # ── Tabs ───────────────────────────────────────────────────────────────────────
-tab_upload, tab_config, tab_rules = st.tabs(["📂 Upload & Run", "⚙️ Configuration", "➕ Custom Rules"])
+tab_upload, tab_config, tab_rules = st.tabs(["📂 Upload & Run", "⚙️ Configuration", "📝 Rules Editor"])
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 1 — Upload & Run
@@ -79,17 +103,17 @@ with tab_upload:
     run_btn = st.button("▶ Run Extraction", type="primary", disabled=not uploaded_files)
 
     if run_btn and uploaded_files:
-        # ── Apply UI configuration to run_rules module ─────────────────────
+        # ── Apply UI configuration overrides ──────────────────────────────
         cfg = st.session_state.get("cfg", {})
 
         report_year = cfg.get("report_year", rr.REPORT_YEAR)
-        rr.REPORT_YEAR           = report_year
-        rr.Q4_START              = date(report_year, cfg.get("q4_month", 10), 1)
-        rr.UG_COURSE_CEILING     = cfg.get("ug_ceiling", rr.UG_COURSE_CEILING)
-        rr.GRANT_COUNTED_ROLES   = set(cfg.get("grant_roles", list(rr.GRANT_COUNTED_ROLES)))
-        rr.GRANT_STATUS_KEYWORD  = cfg.get("grant_status_kw", rr.GRANT_STATUS_KEYWORD)
-        rr.GRANT_PROGRESS_KEYWORD= cfg.get("grant_progress_kw", rr.GRANT_PROGRESS_KEYWORD)
-        rr.GRANT_MIN_END_DATE    = date(report_year, cfg.get("grant_min_month", 10), 1)
+        rr.REPORT_YEAR            = report_year
+        rr.Q4_START               = date(report_year, cfg.get("q4_month", 10), 1)
+        rr.UG_COURSE_CEILING      = cfg.get("ug_ceiling", rr.UG_COURSE_CEILING)
+        rr.GRANT_COUNTED_ROLES    = set(cfg.get("grant_roles", list(rr.GRANT_COUNTED_ROLES)))
+        rr.GRANT_STATUS_KEYWORD   = cfg.get("grant_status_kw", rr.GRANT_STATUS_KEYWORD)
+        rr.GRANT_PROGRESS_KEYWORD = cfg.get("grant_progress_kw", rr.GRANT_PROGRESS_KEYWORD)
+        rr.GRANT_MIN_END_DATE     = date(report_year, cfg.get("grant_min_month", 10), 1)
         if cfg.get("shell_tokens"):
             rr.RESEARCH_SHELL_TOKENS = set(t.strip().upper() for t in cfg["shell_tokens"].split(",") if t.strip())
         if cfg.get("journal_hdrs"):
@@ -103,8 +127,9 @@ with tab_upload:
         if cfg.get("staff_sheet"):
             rr.FILE_STAFF_SHEET = cfg["staff_sheet"]
 
-        # Custom rules from tab 3
-        custom_rules = st.session_state.get("custom_rules", [])
+        # ── Parse custom rules from the Rules Editor ───────────────────────
+        rules_text = st.session_state.get("rules_text", DEFAULT_RULES_TEXT)
+        custom_rules = _parse_custom_rules(rules_text)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             for uf in uploaded_files:
@@ -126,7 +151,7 @@ with tab_upload:
                 faculty_list = [n.strip() for n in specific_names.split(",") if n.strip()]
 
             if not faculty_list:
-                st.warning("⚠️ No faculty detected. Check that FAR PDFs follow the naming pattern `F180Vita_F.Lastname.pdf`.")
+                st.warning("⚠️ No faculty detected. Check FAR PDFs follow the naming pattern `F180Vita_F.Lastname.pdf`.")
                 st.stop()
 
             st.info(f"Found {len(faculty_list)} faculty: {', '.join(faculty_list)}")
@@ -144,9 +169,9 @@ with tab_upload:
 
             st.markdown("---")
             st.subheader("Results")
-            progress = st.progress(0, text="Starting…")
-            log_area = st.empty()
-            results  = []
+            progress  = st.progress(0, text="Starting…")
+            log_area  = st.empty()
+            results   = []
             log_lines = []
 
             for i, last_name in enumerate(faculty_list):
@@ -160,7 +185,7 @@ with tab_upload:
                     r = rr.extract_faculty(
                         last_name,
                         input_dir=tmpdir,
-                        api_key=api_key or None,
+                        api_key=None,
                         all_far_data=all_far_data,
                     )
                 except Exception as e:
@@ -171,23 +196,9 @@ with tab_upload:
 
                 # Run custom rules
                 if r and custom_rules:
-                    cv_text  = all_far_data.get(last_name, (None, ""))[1]
-                    far_data = all_far_data.get(last_name, (None, None))[0] or {}
+                    cv_text = all_far_data.get(last_name, (None, ""))[1]
                     for cr in custom_rules:
-                        col  = cr["name"]
-                        kw   = cr["keyword"].lower()
-                        sec  = cr["section"].lower()
-                        count = 0
-                        in_section = not sec  # if no section filter, scan everything
-                        for line in cv_text.split("\n"):
-                            ll = line.lower()
-                            if sec and sec in ll:
-                                in_section = True
-                            elif in_section and re.match(r'^[A-Z][A-Z\s]{5,}$', line.strip()):
-                                in_section = False
-                            if in_section and kw and kw in ll:
-                                count += 1
-                        r[col] = count
+                        r[cr["name"]] = _run_custom_rule(cv_text, cr)
 
                 if r:
                     results.append(r)
@@ -212,7 +223,6 @@ with tab_upload:
             st.markdown("---")
             st.subheader("📊 Summary")
             import pandas as pd
-            standard_cols = ["Last Name","First Name","Title","UG","Grad","MS","PhD","Grants","CH/CO","CP","Journal"]
             rows = []
             for r in results:
                 row = {
@@ -255,8 +265,7 @@ with tab_config:
                                        options=list(range(1, 13)),
                                        index=cfg.get("grant_min_month", 10) - 1,
                                        format_func=lambda m: date(2000, m, 1).strftime("%B"),
-                                       help="Set to January to count any grant active at any point in the year.")
-
+                                       help="Set to January to count any grant active at any point during the year.")
     with col2:
         st.markdown("#### 📚 Course Rules")
         ug_ceiling = st.number_input(
@@ -278,19 +287,12 @@ with tab_config:
             "Count grants where faculty role is",
             options=["PI", "CoPI", "Other"],
             default=cfg.get("grant_roles", sorted(rr.GRANT_COUNTED_ROLES)),
-            help="Select which collaborator roles qualify a grant for counting.",
         )
-        grant_status_kw = st.text_input(
-            "Grant status must contain",
-            value=cfg.get("grant_status_kw", rr.GRANT_STATUS_KEYWORD),
-            help="e.g. 'funded' — the status field must contain this word.",
-        )
+        grant_status_kw = st.text_input("Grant status must contain",
+                                        value=cfg.get("grant_status_kw", rr.GRANT_STATUS_KEYWORD))
     with col4:
-        grant_progress_kw = st.text_input(
-            "Grant status must also contain",
-            value=cfg.get("grant_progress_kw", rr.GRANT_PROGRESS_KEYWORD),
-            help="e.g. 'progress' — both keywords must appear in the status.",
-        )
+        grant_progress_kw = st.text_input("Grant status must also contain",
+                                          value=cfg.get("grant_progress_kw", rr.GRANT_PROGRESS_KEYWORD))
 
     st.markdown("#### 📄 Publication Section Headers")
     col5, col6 = st.columns(2)
@@ -298,128 +300,118 @@ with tab_config:
         journal_hdrs = st.text_area(
             "Journal section headings (comma-separated)",
             value=cfg.get("journal_hdrs", ", ".join(sorted(rr.JOURNAL_HDR_KW))),
-            height=90,
-            help="Phrases that mark a journal publication section in FAR/CV PDFs.",
-        )
+            height=90)
     with col6:
         conf_hdrs = st.text_area(
             "Conference section headings (comma-separated)",
             value=cfg.get("conf_hdrs", ", ".join(sorted(rr.CONF_HDR_KW))),
-            height=90,
-            help="Phrases that mark a conference publication section in FAR/CV PDFs.",
-        )
+            height=90)
 
     st.markdown("#### 🗂️ File Naming")
     col7, col8, col9 = st.columns(3)
     with col7:
-        cv_pattern = st.text_input("CV filename pattern",
-                                   value=cfg.get("cv_pattern", rr.FILE_PATTERN_CV),
-                                   help="Use {last} as placeholder for last name.")
+        cv_pattern   = st.text_input("CV filename pattern",
+                                     value=cfg.get("cv_pattern", rr.FILE_PATTERN_CV),
+                                     help="Use {last} as placeholder for last name.")
     with col8:
         xlsx_pattern = st.text_input("Supplemental XLSX pattern",
                                      value=cfg.get("xlsx_pattern", rr.FILE_PATTERN_XLSX),
                                      help="Use {last} as placeholder for last name.")
     with col9:
-        staff_sheet = st.text_input("Staff sheet filename",
-                                    value=cfg.get("staff_sheet", rr.FILE_STAFF_SHEET))
+        staff_sheet  = st.text_input("Staff sheet filename",
+                                     value=cfg.get("staff_sheet", rr.FILE_STAFF_SHEET))
 
     if st.button("💾 Save Configuration", type="primary"):
         st.session_state["cfg"] = {
-            "report_year": report_year,
-            "q4_month": q4_month,
-            "grant_min_month": grant_min_month,
-            "ug_ceiling": ug_ceiling,
-            "shell_tokens": shell_tokens,
-            "grant_roles": grant_roles,
-            "grant_status_kw": grant_status_kw,
-            "grant_progress_kw": grant_progress_kw,
-            "journal_hdrs": journal_hdrs,
-            "conf_hdrs": conf_hdrs,
-            "cv_pattern": cv_pattern,
-            "xlsx_pattern": xlsx_pattern,
+            "report_year": report_year, "q4_month": q4_month,
+            "grant_min_month": grant_min_month, "ug_ceiling": ug_ceiling,
+            "shell_tokens": shell_tokens, "grant_roles": grant_roles,
+            "grant_status_kw": grant_status_kw, "grant_progress_kw": grant_progress_kw,
+            "journal_hdrs": journal_hdrs, "conf_hdrs": conf_hdrs,
+            "cv_pattern": cv_pattern, "xlsx_pattern": xlsx_pattern,
             "staff_sheet": staff_sheet,
         }
         st.success("✅ Configuration saved — will apply on next run.")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 3 — Custom Rules
+# TAB 3 — Rules Editor
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_rules:
-    st.subheader("➕ Custom Metrics")
+    st.subheader("📝 Rules Editor")
     st.caption(
-        "Add extra columns to the output by telling the pipeline what to count. "
-        "Each rule scans the CV PDF for a keyword inside a named section."
+        "The standard rules are shown below and always run. "
+        "To add a custom metric, uncomment one of the examples or add your own line "
+        "in the format:  **Column Name  |  Section in CV  |  Keyword to count**"
     )
 
-    if "custom_rules" not in st.session_state:
-        st.session_state["custom_rules"] = []
+    rules_text = st.text_area(
+        label="Rules",
+        value=st.session_state.get("rules_text", DEFAULT_RULES_TEXT),
+        height=500,
+        label_visibility="collapsed",
+        help="Lines starting with # are comments. Custom rule lines must have exactly two | separators.",
+    )
 
-    # Display existing rules
-    rules = st.session_state["custom_rules"]
-    if rules:
-        st.markdown("**Active custom rules:**")
-        to_delete = []
-        for idx, cr in enumerate(rules):
-            col_a, col_b, col_c, col_d = st.columns([2, 3, 3, 1])
-            col_a.markdown(f"**{cr['name']}**")
-            col_b.markdown(f"Section: `{cr['section'] or 'entire CV'}`")
-            col_c.markdown(f"Keyword: `{cr['keyword']}`")
-            if col_d.button("🗑️", key=f"del_{idx}"):
-                to_delete.append(idx)
-        for idx in reversed(to_delete):
-            rules.pop(idx)
-        st.session_state["custom_rules"] = rules
-        st.markdown("---")
-
-    # Add new rule form
-    st.markdown("**Add a new rule:**")
-    col1, col2, col3 = st.columns([2, 3, 3])
-    with col1:
-        new_name = st.text_input("Column name", placeholder="e.g. Invited Talks",
-                                 help="This becomes a new column in the output Excel.")
-    with col2:
-        new_section = st.text_input("Look inside section (optional)",
-                                    placeholder="e.g. Invited Talks",
-                                    help="Leave blank to search the entire CV. "
-                                         "Enter a section heading to restrict the search.")
-    with col3:
-        new_keyword = st.text_input("Count lines containing",
-                                    placeholder="e.g. invited talk",
-                                    help="Each line in the section that contains this word is counted.")
-
-    if st.button("➕ Add Rule"):
-        if not new_name:
-            st.error("Please enter a column name.")
-        elif not new_keyword:
-            st.error("Please enter a keyword to count.")
-        elif any(cr["name"] == new_name for cr in rules):
-            st.error(f"A rule named '{new_name}' already exists.")
-        else:
-            st.session_state["custom_rules"].append({
-                "name": new_name,
-                "section": new_section.strip(),
-                "keyword": new_keyword.strip(),
-            })
-            st.success(f"✅ Rule '{new_name}' added.")
+    col_a, col_b = st.columns([1, 4])
+    with col_a:
+        if st.button("💾 Save Rules", type="primary"):
+            st.session_state["rules_text"] = rules_text
+            custom = _parse_custom_rules(rules_text)
+            st.success(f"✅ Saved — {len(custom)} custom rule(s) active.")
+    with col_b:
+        if st.button("↩️ Reset to defaults"):
+            st.session_state["rules_text"] = DEFAULT_RULES_TEXT
             st.rerun()
 
-    st.markdown("---")
-    st.markdown("**Examples of rules you can add:**")
-    examples = [
-        ("Invited Talks",   "Invited Talks",        "invited"),
-        ("Book Chapters",   "Book Chapters",         "chapter"),
-        ("Patents",         "Patents",               "patent"),
-        ("Awards",          "Honors and Awards",     "award"),
-        ("Editorials",      "Editorial",             "editor"),
-    ]
-    ex_cols = st.columns(len(examples))
-    for col, (name, section, kw) in zip(ex_cols, examples):
-        with col:
-            st.markdown(f"**{name}**")
-            st.caption(f"Section: _{section}_\nKeyword: _{kw}_")
-            if st.button(f"Add", key=f"ex_{name}"):
-                if not any(cr["name"] == name for cr in st.session_state["custom_rules"]):
-                    st.session_state["custom_rules"].append(
-                        {"name": name, "section": section, "keyword": kw}
-                    )
-                    st.rerun()
+    # Live preview of active custom rules
+    custom_preview = _parse_custom_rules(rules_text)
+    if custom_preview:
+        st.markdown("---")
+        st.markdown("**Active custom rules (will add columns to output):**")
+        for cr in custom_preview:
+            section_label = f"in section *{cr['section']}*" if cr["section"] else "across entire CV"
+            st.markdown(f"- **{cr['name']}** — count lines with `{cr['keyword']}` {section_label}")
+    else:
+        st.info("No active custom rules. Uncomment or add lines below the dashed separator to add one.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Helpers (defined at module level so all tabs can call them)
+# ══════════════════════════════════════════════════════════════════════════════
+def _parse_custom_rules(text):
+    """Parse the Rules Editor text into a list of {name, section, keyword} dicts."""
+    rules = []
+    STANDARD = {"ug courses","grad courses","ms graduated","phd graduated",
+                 "grants","ch/co","cp","journal"}
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) != 3:
+            continue
+        name, section, keyword = parts
+        if not name or not keyword:
+            continue
+        if name.lower() in STANDARD:
+            continue  # skip standard-rule description lines
+        rules.append({"name": name, "section": section, "keyword": keyword.lower()})
+    return rules
+
+
+def _run_custom_rule(cv_text, cr):
+    """Count lines in cv_text that match the custom rule's section + keyword."""
+    count     = 0
+    section   = cr["section"].lower()
+    keyword   = cr["keyword"].lower()
+    in_section = not section  # no section filter → scan everything
+    for line in cv_text.split("\n"):
+        stripped = line.strip()
+        ll = stripped.lower()
+        if section and section in ll:
+            in_section = True
+        elif in_section and section and re.match(r'^[A-Z][A-Z\s]{5,}$', stripped):
+            in_section = False
+        if in_section and keyword in ll:
+            count += 1
+    return count
