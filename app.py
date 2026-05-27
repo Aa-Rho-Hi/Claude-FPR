@@ -83,8 +83,8 @@ if run_btn and uploaded_files:
                 fh.write(uf.getbuffer())
 
         # Determine faculty list
+        _known = getattr(rr, 'KNOWN_FACULTY', ['Narayanan', 'Qian', 'Palermo', 'Hu', 'Duffield'])
         if run_mode == "All detected faculty":
-            _known = getattr(rr, 'KNOWN_FACULTY', ['Narayanan', 'Qian', 'Palermo', 'Hu', 'Duffield'])
             faculty_list = list(_known)
             for fp in glob.glob(os.path.join(tmpdir, "F180Vita_*.pdf")):
                 m = re.match(r'F180Vita_\w+\.(\w+)\.pdf', os.path.basename(fp))

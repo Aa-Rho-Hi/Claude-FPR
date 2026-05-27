@@ -27,25 +27,123 @@ import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
-# ── Constants ──────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# ██  DEPARTMENT CONFIGURATION  ███████████████████████████████████████████████
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Edit the values in this section to adapt the pipeline to your department.
+# Everything below this block is extraction logic — no need to touch it.
+#
+# ── 1. Report year ────────────────────────────────────────────────────────────
+#   The calendar year covered by this FAR cycle.
+#   Q4_START is the first day of Q4 (used for grant-activity check).
 REPORT_YEAR = 2024
-Q4_START    = date(REPORT_YEAR, 10, 1)
+Q4_START    = date(REPORT_YEAR, 10, 1)      # Oct 1 of report year
 
+# ── 2. Known faculty ──────────────────────────────────────────────────────────
+#   Last names of all faculty whose files will be processed when you run
+#   "python run_rules.py" (i.e. the default "all" mode).
+#   The pipeline also auto-detects anyone whose FAR PDF is present in the
+#   input folder, so you only need to list people whose files might be missing.
+KNOWN_FACULTY = [
+    'Narayanan', 'Qian', 'Palermo', 'Hu', 'Duffield',
+    # Add more last names here:
+    # 'Smith', 'Jones',
+]
+
+# ── 3. File naming patterns ───────────────────────────────────────────────────
+#   Patterns used to locate each file type.
+#   {last} is replaced with the faculty member's last name.
+#
+#   FAR PDF      : F180Vita_<Initial>.<Last>.pdf   (auto-detected by glob)
+#   CV PDF       : {last} CV.pdf
+#   Supplemental : {last}.xlsx
+#   Staff sheet  : exact filename below
+FILE_PATTERN_CV    = "{last} CV.pdf"          # e.g. "Narayanan CV.pdf"
+FILE_PATTERN_XLSX  = "{last}.xlsx"            # e.g. "Narayanan.xlsx"
+FILE_STAFF_SHEET   = "Faculty Support Staff (PostDoc and GARs).xlsx"
+
+# ── 4. Course classification ───────────────────────────────────────────────────
+#   UG_COURSE_CEILING : course numbers BELOW this are undergrad (Rule 1).
+#                       Set to 500 for most US ECE/CS departments (300–499 = UG,
+#                       500+ = grad). Change to 400 if your dept uses 400-level
+#                       as the grad threshold.
+UG_COURSE_CEILING = 500
+
+#   RESEARCH_SHELL_TOKENS : words in a course title that mark it as a
+#   research/independent-study shell (excluded from both UG and Grad counts).
+#   Add any department-specific shells (e.g. 'CAPSTONE', 'PROJECT').
 RESEARCH_SHELL_TOKENS = {
     'RESEARCH', 'SEMINAR', 'INDEPENDENT', 'INTERNSHIP',
     'DIRECTED', 'PRACTICUM', 'SPECIAL', 'THESIS', 'DISSERTATION',
+    # 'CAPSTONE', 'PROJECT',   ← uncomment / add as needed
 }
+
+#   HONORS_TOKENS : title words that mark a section as an honors capstone.
+#   A course number that appears ONLY with these titles (never plain) counts
+#   as a Grad course under Rule 2.
 HONORS_TOKENS = {'HNR', 'HONORS'}
 
+# ── 5. Publication section headers ────────────────────────────────────────────
+#   Keywords the parser looks for to detect journal vs. conference sections
+#   in FAR and CV PDFs.  Add phrases that appear in your dept's CV template.
 JOURNAL_HDR_KW = {
     'refereed journal', 'journal article', 'archival journal',
     'peer-reviewed journal', 'journal papers', 'journal publications',
+    # 'transactions',   ← add if your CVs use a different heading
 }
 CONF_HDR_KW = {
     'conference proceeding', 'conference paper', 'conference publication',
     'refereed conference', 'peer-reviewed conference',
+    # 'symposium papers',
 }
+
+#   Publication statuses treated as "published" when counting journal entries.
 JOURNAL_STATUS = {'published', 'accepted', 'in press', 'to appear'}
+
+# ── 6. Grant qualification rules ─────────────────────────────────────────────
+#   A grant is counted (Rule 5) when ALL of the following are true:
+#     • status contains GRANT_STATUS_KEYWORD  (default: 'funded')
+#     • status contains GRANT_PROGRESS_KEYWORD (default: 'progress')
+#     • start date falls within the report year
+#     • end date is on or after GRANT_MIN_END_DATE (default: Q4_START)
+#     • role is in GRANT_COUNTED_ROLES
+#
+#   Change GRANT_MIN_END_DATE to date(REPORT_YEAR, 1, 1) if your dept counts
+#   any grant active at any point during the year (not just through Q4).
+GRANT_STATUS_KEYWORD   = 'funded'
+GRANT_PROGRESS_KEYWORD = 'progress'
+GRANT_MIN_END_DATE     = Q4_START               # grant must reach Q4
+GRANT_COUNTED_ROLES    = {'PI', 'CoPI'}         # add 'Other' if needed
+
+# ── 7. Custom rules (add your own below) ─────────────────────────────────────
+#   If your department tracks additional metrics, implement them here as
+#   functions and call them inside extract_faculty() further down the file.
+#
+#   Template:
+#
+#   def rule_custom_<name>(far, cv, xlsx):
+#       """
+#       <Describe what this rule counts.>
+#       Returns: int
+#       """
+#       count = 0
+#       # --- your logic here ---
+#       # Example: count invited talks from FAR publication text
+#       # for line in far.get('full_text', '').split('\n'):
+#       #     if 'invited talk' in line.lower():
+#       #         count += 1
+#       return count
+#
+#   Then in extract_faculty() add:
+#       custom_val = rule_custom_<name>(far, cv, xlsx)
+#   And include it in the result dict:
+#       result['custom_<name>'] = custom_val
+#   And add the column to generate_excel() in the Summary / output sheets.
+#
+# ══════════════════════════════════════════════════════════════════════════════
+# ██  END OF CONFIGURATION — do not edit below unless you know what you're doing
+# ══════════════════════════════════════════════════════════════════════════════
 
 DEBUG = False
 
@@ -951,7 +1049,7 @@ def rule1_ug_courses(far):
     seen = set()
     for c in far['teaching']:
         n = c['course_num']
-        if n < 500 and not is_research_shell(c) and n not in pure_cap:
+        if n < UG_COURSE_CEILING and not is_research_shell(c) and n not in pure_cap:
             seen.add(n)
     dbg(f"UG courses: {seen}")
     return len(seen)
@@ -962,7 +1060,7 @@ def rule2_grad_courses(far):
     seen = set()
     for c in far['teaching']:
         n = c['course_num']
-        if not is_research_shell(c) and (n >= 500 or n in pure_cap):
+        if not is_research_shell(c) and (n >= UG_COURSE_CEILING or n in pure_cap):
             seen.add(n)
     dbg(f"Grad courses: {seen}")
     return len(seen)
@@ -1158,10 +1256,10 @@ def rule5_grants(far, cv_text='', faculty_last_name='', all_far_data=None):
     canonical  = set()
     for g in far['grants']:
         status = g['status'].lower()
-        if 'funded' not in status or 'progress' not in status:
+        if GRANT_STATUS_KEYWORD not in status or GRANT_PROGRESS_KEYWORD not in status:
             continue
         role = g['role']
-        if role not in ('PI', 'CoPI'):
+        if role not in GRANT_COUNTED_ROLES:
             continue
         start = parse_date(g['start'])
         if not start:
@@ -1169,9 +1267,9 @@ def rule5_grants(far, cv_text='', faculty_last_name='', all_far_data=None):
         # Grant must have started IN the report year
         if not (year_start <= start <= year_end):
             continue
-        # End date, if present, must reach Q4 (grant still active in Oct–Dec)
+        # End date, if present, must reach the configured minimum end date
         end = parse_date(g['end'])
-        if end is not None and end < Q4_START:
+        if end is not None and end < GRANT_MIN_END_DATE:
             continue
         # Among qualifying grants, deduplicate by canonical title only
         # (same project may have multiple matching rows from continuation pages)
@@ -1413,13 +1511,13 @@ def find_files(last_name, input_dir='.'):
                    if last_name.lower() in f.lower()]
     files['far'] = matches[0] if matches else None
 
-    cv = os.path.join(input_dir, f"{last_name} CV.pdf")
+    cv = os.path.join(input_dir, FILE_PATTERN_CV.format(last=last_name))
     files['cv'] = cv if os.path.exists(cv) else None
 
-    xl = os.path.join(input_dir, f"{last_name}.xlsx")
+    xl = os.path.join(input_dir, FILE_PATTERN_XLSX.format(last=last_name))
     files['xlsx'] = xl if os.path.exists(xl) else None
 
-    staff = os.path.join(input_dir, "Faculty Support Staff (PostDoc and GARs).xlsx")
+    staff = os.path.join(input_dir, FILE_STAFF_SHEET)
     files['staff'] = staff if os.path.exists(staff) else None
 
     return files
@@ -1566,6 +1664,79 @@ def generate_excel(results, output_path):
     wb.save(output_path)
     print(f"\nSaved: {output_path}")
 
+
+# ── CLI ────────────────────────────────────────────────────────────────────────
+
+
+def main():
+    global DEBUG
+    parser = argparse.ArgumentParser(description="FAR Extraction Engine")
+    parser.add_argument("faculty", nargs="?", default="all")
+    parser.add_argument("--input-dir", default=".")
+    parser.add_argument("--output", default="far_extraction_output.xlsx")
+    parser.add_argument("--api-key", default=None)
+    parser.add_argument("--debug", action="store_true")
+    args = parser.parse_args()
+    DEBUG = args.debug
+
+    if args.faculty.lower() == "all":
+        faculty_list = list(KNOWN_FACULTY)
+        for f in glob.glob(os.path.join(args.input_dir, "F180Vita_*.pdf")):
+            m = re.match(r'F180Vita_\w+\.(\w+)\.pdf', os.path.basename(f))
+            if m and m.group(1) not in faculty_list:
+                faculty_list.append(m.group(1))
+    else:
+        faculty_list = [args.faculty]
+
+    # Pre-pass: parse ALL available FAR PDFs so cross-referencing works,
+    # even when processing only a subset of faculty.
+    # Uses a pickle cache keyed by (path, mtime) to avoid re-parsing unchanged PDFs.
+    import pickle, hashlib
+    cache_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.far_cache.pkl')
+    try:
+        with open(cache_path, 'rb') as _cf:
+            _cache = pickle.load(_cf)
+    except Exception:
+        _cache = {}
+
+    all_far_data = {}
+    _cache_dirty = False
+    for far_path in glob.glob(os.path.join(args.input_dir, "F180Vita_*.pdf")):
+        m = re.match(r'F180Vita_\w+\.(\w+)\.pdf', os.path.basename(far_path))
+        if not m:
+            continue
+        ln = m.group(1)
+        try:
+            mtime = os.path.getmtime(far_path)
+            cache_key = (far_path, mtime)
+            if cache_key in _cache:
+                all_far_data[ln] = _cache[cache_key]
+            else:
+                parsed = (parse_far(far_path), pdf_full_text(far_path))
+                all_far_data[ln] = parsed
+                _cache[cache_key] = parsed
+                _cache_dirty = True
+        except Exception:
+            pass
+
+    if _cache_dirty:
+        try:
+            with open(cache_path, 'wb') as _cf:
+                pickle.dump(_cache, _cf)
+        except Exception:
+            pass
+
+    results = []
+    for last_name in faculty_list:
+        r = extract_faculty(last_name, args.input_dir, args.api_key,
+                            all_far_data=all_far_data)
+        if r:
+            results.append(r)
+
+    if results:
+        generate_excel(results, args.output)
+
+    print(f"\nDone — {len(results)} faculty processed.")
 
 
 if __name__ == "__main__":
