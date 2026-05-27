@@ -19,6 +19,49 @@ if not _import_ok:
     st.error(f"❌ Failed to load run_rules.py: {_import_err}")
     st.stop()
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Helpers — defined before tabs so all sections can call them
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _parse_custom_rules(text):
+    """Parse the Rules Editor text into a list of {name, section, keyword} dicts."""
+    rules = []
+    STANDARD = {"ug courses","grad courses","ms graduated","phd graduated",
+                 "grants","ch/co","cp","journal"}
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) != 3:
+            continue
+        name, section, keyword = parts
+        if not name or not keyword:
+            continue
+        if name.lower() in STANDARD:
+            continue  # skip standard-rule description lines
+        rules.append({"name": name, "section": section, "keyword": keyword.lower()})
+    return rules
+
+
+def _run_custom_rule(cv_text, cr):
+    """Count lines in cv_text that match the custom rule's section + keyword."""
+    count      = 0
+    section    = cr["section"].lower()
+    keyword    = cr["keyword"].lower()
+    in_section = not section  # no section filter → scan everything
+    for line in cv_text.split("\n"):
+        stripped = line.strip()
+        ll = stripped.lower()
+        if section and section in ll:
+            in_section = True
+        elif in_section and section and re.match(r'^[A-Z][A-Z\s]{5,}$', stripped):
+            in_section = False
+        if in_section and keyword in ll:
+            count += 1
+    return count
+
+
 # ── Default rule editor text ───────────────────────────────────────────────────
 DEFAULT_RULES_TEXT = """\
 # ─────────────────────────────────────────────────────────────────────────────
@@ -375,43 +418,3 @@ with tab_rules:
         st.info("No active custom rules. Uncomment or add lines below the dashed separator to add one.")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Helpers (defined at module level so all tabs can call them)
-# ══════════════════════════════════════════════════════════════════════════════
-def _parse_custom_rules(text):
-    """Parse the Rules Editor text into a list of {name, section, keyword} dicts."""
-    rules = []
-    STANDARD = {"ug courses","grad courses","ms graduated","phd graduated",
-                 "grants","ch/co","cp","journal"}
-    for line in text.split("\n"):
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        parts = [p.strip() for p in line.split("|")]
-        if len(parts) != 3:
-            continue
-        name, section, keyword = parts
-        if not name or not keyword:
-            continue
-        if name.lower() in STANDARD:
-            continue  # skip standard-rule description lines
-        rules.append({"name": name, "section": section, "keyword": keyword.lower()})
-    return rules
-
-
-def _run_custom_rule(cv_text, cr):
-    """Count lines in cv_text that match the custom rule's section + keyword."""
-    count     = 0
-    section   = cr["section"].lower()
-    keyword   = cr["keyword"].lower()
-    in_section = not section  # no section filter → scan everything
-    for line in cv_text.split("\n"):
-        stripped = line.strip()
-        ll = stripped.lower()
-        if section and section in ll:
-            in_section = True
-        elif in_section and section and re.match(r'^[A-Z][A-Z\s]{5,}$', stripped):
-            in_section = False
-        if in_section and keyword in ll:
-            count += 1
-    return count
