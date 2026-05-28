@@ -563,8 +563,10 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("#### 🤖 AI Extraction (Option B)")
     st.caption(
-        "Provide an API key to let an AI model read the Rules Editor text and "
-        "extract values directly. Leave blank to use the built-in rule-based engine."
+        "Standard fields (UG, Grad, MS, PhD, etc.) always use the accurate "
+        "rule-based pipeline. Provide an API key to power **custom rules** "
+        "you add in the Rules Editor with AI — so plain-English instructions "
+        "like 'count invited talks' actually work."
     )
     ai_api_key = st.text_input(
         "AI API Key",
@@ -700,7 +702,7 @@ with tab_upload:
             st.markdown("---")
             st.subheader("Results")
             if ai_api_key:
-                st.caption("🤖 AI extraction is active — rules text is sent to the AI model for interpretation.")
+                st.caption("🤖 Hybrid mode — standard fields via rule-based pipeline, custom rules via AI.")
             else:
                 st.caption("🔵 Rule-based extraction — using built-in pipeline.")
             progress  = st.progress(0, text="Starting…")
@@ -715,53 +717,61 @@ with tab_upload:
 
                 r = None
 
-                # ── Try AI extraction if API key provided ──────────────────
-                if ai_api_key:
-                    far_text_ai = all_far_data.get(last_name, (None, ""))[1]
-                    cv_path_ai  = os.path.join(tmpdir, f"{last_name} CV.pdf")
-                    cv_text_ai  = ""
-                    if os.path.exists(cv_path_ai):
-                        try:
-                            cv_text_ai = rr.pdf_full_text(cv_path_ai)
-                        except Exception:
-                            pass
-                    xlsx_path_ai = os.path.join(tmpdir, f"{last_name}.xlsx")
-                    xlsx_summary_ai = _xlsx_to_summary(xlsx_path_ai) if os.path.exists(xlsx_path_ai) else ""
-
-                    r = extract_with_ai(
-                        rules_text      = rules_text,
-                        last_name       = last_name,
-                        far_text        = far_text_ai,
-                        cv_text         = cv_text_ai,
-                        xlsx_summary    = xlsx_summary_ai,
-                        custom_rules    = custom_rules,
-                        api_key         = ai_api_key,
-                        base_url        = ai_base_url if ai_base_url else None,
-                        model           = ai_model or "gpt-4o",
+                # ── Standard fields: always use rule-based pipeline ────────
+                old_stdout = sys.stdout
+                sys.stdout = io.StringIO()
+                try:
+                    r = rr.extract_faculty(
+                        last_name,
+                        input_dir=tmpdir,
+                        api_key=None,
+                        all_far_data=all_far_data,
                     )
+                except Exception as e:
+                    r = None
+                    log_lines[-1] = f"❌ **{last_name}** — {e}"
+                finally:
+                    sys.stdout = old_stdout
 
-                # ── Fallback: rule-based extraction ───────────────────────
                 if r is None:
-                    old_stdout = sys.stdout
-                    sys.stdout = io.StringIO()
-                    try:
-                        r = rr.extract_faculty(
-                            last_name,
-                            input_dir=tmpdir,
-                            api_key=None,
-                            all_far_data=all_far_data,
-                        )
-                    except Exception as e:
-                        r = None
-                        log_lines[-1] = f"❌ **{last_name}** — {e}"
-                    finally:
-                        sys.stdout = old_stdout
+                    log_area.markdown("\n\n".join(log_lines))
+                    continue
 
-                    # Run custom rules on top of rule-based result
-                    if r and custom_rules:
-                        cv_text = all_far_data.get(last_name, (None, ""))[1]
+                # ── Custom rules: use AI if key provided, else regex ───────
+                if custom_rules:
+                    cv_text_full = all_far_data.get(last_name, (None, ""))[1]
+
+                    if ai_api_key:
+                        # Get full CV text for AI custom rule extraction
+                        cv_path_cr = os.path.join(tmpdir, f"{last_name} CV.pdf")
+                        cv_text_cr = cv_text_full
+                        if os.path.exists(cv_path_cr):
+                            try:
+                                cv_text_cr = rr.pdf_full_text(cv_path_cr)
+                            except Exception:
+                                pass
+
+                        ai_result = extract_with_ai(
+                            rules_text   = rules_text,
+                            last_name    = last_name,
+                            far_text     = cv_text_full,
+                            cv_text      = cv_text_cr,
+                            xlsx_summary = "",
+                            custom_rules = custom_rules,
+                            api_key      = ai_api_key,
+                            base_url     = ai_base_url if ai_base_url else None,
+                            model        = ai_model or "protected.gpt-5",
+                        )
+                        if ai_result:
+                            for cr in custom_rules:
+                                r[cr["name"]] = ai_result.get(cr["name"], 0)
+                        else:
+                            # AI failed — fall back to regex for custom rules
+                            for cr in custom_rules:
+                                r[cr["name"]] = _run_custom_rule(cv_text_full, cr)
+                    else:
                         for cr in custom_rules:
-                            r[cr["name"]] = _run_custom_rule(cv_text, cr)
+                            r[cr["name"]] = _run_custom_rule(cv_text_full, cr)
 
                 if r:
                     results.append(r)
