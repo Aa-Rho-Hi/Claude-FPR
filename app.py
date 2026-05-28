@@ -273,54 +273,58 @@ Now extract the data and return ONLY the JSON object."""
         "stream": False,          # explicitly disable streaming
     }
 
-    def _parse_sse_content(text: str) -> str:
-        """
-        Reassemble content from a Server-Sent Events stream.
-        TAMU sends metadata chunks + [DONE] early, then the real content chunks follow.
-        So we do NOT stop at [DONE] — we collect delta.content from every chunk.
-        """
+    try:
+        # Use stream=True so we read the SSE response line-by-line as it arrives
+        resp = _requests.post(
+            endpoint, json=payload, headers=headers,
+            timeout=120, stream=True
+        )
+
+        if not resp.ok:
+            body = resp.content[:300].decode("utf-8", errors="replace")
+            st.warning(f"⚠️ {last_name}: AI API returned {resp.status_code} — {body}. Falling back.")
+            return None
+
+        # Read SSE lines and collect all delta.content fragments
         content_parts = []
-        for line in text.splitlines():
-            line = line.strip()
-            if not line.startswith("data:"):
+        raw_lines_seen = []
+        for raw_line in resp.iter_lines():
+            if isinstance(raw_line, bytes):
+                raw_line = raw_line.decode("utf-8", errors="replace")
+            raw_line = raw_line.strip()
+            raw_lines_seen.append(raw_line)
+
+            if not raw_line.startswith("data:"):
                 continue
-            payload_str = line[5:].strip()
+            payload_str = raw_line[5:].strip()
             if payload_str == "[DONE]":
-                continue   # skip but don't stop — real content may follow
+                continue          # TAMU may emit [DONE] mid-stream; keep going
             try:
                 chunk = json.loads(payload_str)
+                # Standard OpenAI streaming delta format
                 delta = (chunk.get("choices") or [{}])[0].get("delta") or {}
-                part = delta.get("content") or ""
+                part  = delta.get("content") or ""
                 if part:
                     content_parts.append(part)
             except Exception:
                 continue
-        return "".join(content_parts)
 
-    try:
-        resp = _requests.post(endpoint, json=payload, headers=headers, timeout=90)
+        content = "".join(content_parts)
 
-        if not resp.ok:
-            st.warning(f"⚠️ {last_name}: AI API returned {resp.status_code} — {resp.text[:200]}. Falling back.")
-            return None
-
-        # Try standard JSON parse first; fall back to SSE reassembly
-        content = ""
-        try:
-            resp_json = resp.json()
-            choices = resp_json.get("choices") or []
-            if choices:
-                message = choices[0].get("message") or {}
+        # Last-resort: maybe response was plain JSON (non-streaming)
+        if not content:
+            full_text = "\n".join(raw_lines_seen)
+            try:
+                resp_json = json.loads(full_text)
+                message = (resp_json.get("choices") or [{}])[0].get("message") or {}
                 content = message.get("content") or ""
-        except Exception:
-            pass   # not JSON — likely SSE stream
-
-        # If content still empty, attempt SSE reassembly
-        if not content and "data:" in resp.text:
-            content = _parse_sse_content(resp.text)
+            except Exception:
+                pass
 
         if not content:
-            st.warning(f"⚠️ {last_name}: AI returned empty content. Falling back.")
+            # Show what we actually received to help diagnose
+            preview = "\n".join(raw_lines_seen[:30])
+            st.warning(f"⚠️ {last_name}: AI returned empty content. Raw preview:\n```\n{preview}\n```")
             return None
 
         raw = content.strip()
