@@ -279,7 +279,20 @@ Now extract the data and return ONLY the JSON object."""
             return None
 
         resp_json = resp.json()
-        raw = resp_json["choices"][0]["message"]["content"].strip()
+
+        # Debug: show raw response so we can diagnose format issues
+        with st.expander(f"🔍 Debug — raw API response for {last_name}", expanded=False):
+            st.json(resp_json)
+
+        # Navigate choices safely
+        choices = resp_json.get("choices") or []
+        if not choices:
+            st.warning(f"⚠️ {last_name}: AI response had no choices — {str(resp_json)[:300]}. Falling back.")
+            return None
+
+        message = choices[0].get("message") or {}
+        content = message.get("content") or ""
+        raw = content.strip()
 
         # Strip markdown fences if the model added them despite instructions
         raw = re.sub(r'^```(?:json)?\s*', '', raw, flags=re.I)
