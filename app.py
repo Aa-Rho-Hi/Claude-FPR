@@ -23,8 +23,85 @@ if not _import_ok:
 # Helpers — defined before tabs so all sections can call them
 # ══════════════════════════════════════════════════════════════════════════════
 
+RULE_TYPES = {
+    "Count entries containing keyword":
+        "Count each numbered entry (1. 2. 3. …) in a section that contains a specific word.\n"
+        "Example: count all patents → section: Patents, keyword: patent",
+    "Count all entries in section":
+        "Count every numbered entry in a section, regardless of content.\n"
+        "Example: count all book chapters → section: Book Chapters",
+    "Count entries from a specific year":
+        "Count numbered entries in a section that mention a particular year.\n"
+        "Example: count 2024 invited talks → section: Invited Talks, year: 2024",
+    "Count entries matching ALL keywords":
+        "Count entries that contain every keyword listed (AND logic).\n"
+        "Example: must contain both 'IEEE' and 'transactions' → keywords: IEEE, transactions",
+    "Count entries matching ANY keyword":
+        "Count entries that contain at least one of the keywords listed (OR logic).\n"
+        "Example: count entries with 'award' or 'prize' → keywords: award, prize",
+    "Count entries NOT containing keyword":
+        "Count entries in a section that do NOT contain a keyword (exclusion).\n"
+        "Example: conference papers excluding workshops → keyword: workshop",
+}
+
+def _run_custom_rule(cv_text, cr):
+    """Run a custom rule against cv_text and return an integer count."""
+    section    = cr.get("section", "").strip().lower()
+    rule_type  = cr.get("rule_type", "Count entries containing keyword")
+    keywords   = [k.strip().lower() for k in cr.get("keywords", "").split(",") if k.strip()]
+    year_str   = str(cr.get("year", "")).strip()
+
+    # Extract the relevant section text
+    lines      = cv_text.split("\n")
+    in_sec     = not section
+    sec_lines  = []
+    for line in lines:
+        stripped = line.strip()
+        ll = stripped.lower()
+        if section and section in ll:
+            in_sec = True; continue
+        if in_sec and section and re.match(r'^[A-Z][A-Z\s]{5,}$', stripped) and stripped.lower() != section:
+            in_sec = False
+        if in_sec:
+            sec_lines.append(stripped)
+
+    sec_text = "\n".join(sec_lines)
+
+    # Split into numbered entries
+    entry_pat = re.compile(r'(?m)^\d+[\.\)]\s')
+    splits    = [m.start() for m in entry_pat.finditer(sec_text)]
+    if splits:
+        entries = [sec_text[splits[i]: splits[i+1] if i+1 < len(splits) else len(sec_text)]
+                   for i in range(len(splits))]
+    else:
+        # No numbered entries — fall back to non-blank lines
+        entries = [l for l in sec_lines if l]
+
+    count = 0
+    for entry in entries:
+        el = entry.lower()
+        if rule_type == "Count all entries in section":
+            count += 1
+        elif rule_type == "Count entries containing keyword":
+            if keywords and keywords[0] in el:
+                count += 1
+        elif rule_type == "Count entries from a specific year":
+            if year_str and year_str in el:
+                count += 1
+        elif rule_type == "Count entries matching ALL keywords":
+            if keywords and all(k in el for k in keywords):
+                count += 1
+        elif rule_type == "Count entries matching ANY keyword":
+            if keywords and any(k in el for k in keywords):
+                count += 1
+        elif rule_type == "Count entries NOT containing keyword":
+            if keywords and keywords[0] not in el:
+                count += 1
+    return count
+
+
 def _parse_custom_rules(text):
-    """Parse the Rules Editor text into a list of {name, section, keyword} dicts."""
+    """Legacy text-format parser — kept for backward compatibility with saved rules."""
     rules = []
     STANDARD = {"ug courses","grad courses","ms graduated","phd graduated",
                  "grants","ch/co","cp","journal"}
@@ -39,27 +116,15 @@ def _parse_custom_rules(text):
         if not name or not keyword:
             continue
         if name.lower() in STANDARD:
-            continue  # skip standard-rule description lines
-        rules.append({"name": name, "section": section, "keyword": keyword.lower()})
+            continue
+        rules.append({
+            "name":      name,
+            "section":   section,
+            "rule_type": "Count entries containing keyword",
+            "keywords":  keyword,
+            "year":      "",
+        })
     return rules
-
-
-def _run_custom_rule(cv_text, cr):
-    """Count lines in cv_text that match the custom rule's section + keyword."""
-    count      = 0
-    section    = cr["section"].lower()
-    keyword    = cr["keyword"].lower()
-    in_section = not section  # no section filter → scan everything
-    for line in cv_text.split("\n"):
-        stripped = line.strip()
-        ll = stripped.lower()
-        if section and section in ll:
-            in_section = True
-        elif in_section and section and re.match(r'^[A-Z][A-Z\s]{5,}$', stripped):
-            in_section = False
-        if in_section and keyword in ll:
-            count += 1
-    return count
 
 
 # ── Default rule editor text ───────────────────────────────────────────────────
@@ -170,9 +235,8 @@ with tab_upload:
         if cfg.get("staff_sheet"):
             rr.FILE_STAFF_SHEET = cfg["staff_sheet"]
 
-        # ── Parse custom rules from the Rules Editor ───────────────────────
-        rules_text = st.session_state.get("rules_text", DEFAULT_RULES_TEXT)
-        custom_rules = _parse_custom_rules(rules_text)
+        # ── Load custom rules from the Rules Editor ────────────────────────
+        custom_rules = st.session_state.get("custom_rules", [])
 
         with tempfile.TemporaryDirectory() as tmpdir:
             for uf in uploaded_files:
@@ -381,40 +445,125 @@ with tab_config:
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_rules:
     st.subheader("📝 Rules Editor")
-    st.caption(
-        "The standard rules are shown below and always run. "
-        "To add a custom metric, uncomment one of the examples or add your own line "
-        "in the format:  **Column Name  |  Section in CV  |  Keyword to count**"
-    )
 
-    rules_text = st.text_area(
-        label="Rules",
-        value=st.session_state.get("rules_text", DEFAULT_RULES_TEXT),
-        height=500,
-        label_visibility="collapsed",
-        help="Lines starting with # are comments. Custom rule lines must have exactly two | separators.",
-    )
+    if "custom_rules" not in st.session_state:
+        st.session_state["custom_rules"] = []
 
-    col_a, col_b = st.columns([1, 4])
-    with col_a:
-        if st.button("💾 Save Rules", type="primary"):
-            st.session_state["rules_text"] = rules_text
-            custom = _parse_custom_rules(rules_text)
-            st.success(f"✅ Saved — {len(custom)} custom rule(s) active.")
-    with col_b:
-        if st.button("↩️ Reset to defaults"):
-            st.session_state["rules_text"] = DEFAULT_RULES_TEXT
+    # ── Standard rules (read-only reference) ──────────────────────────────────
+    with st.expander("📋 Standard rules (always applied — click to view)", expanded=False):
+        standard = [
+            ("UG Courses",    "Counts distinct undergrad course numbers taught this year (below the UG ceiling)."),
+            ("Grad Courses",  "Counts distinct graduate course numbers taught this year (at or above the UG ceiling)."),
+            ("MS Graduated",  "Counts MS/MEN students who graduated this year with faculty as chair."),
+            ("PhD Graduated", "Counts PhD students who graduated this year with faculty as chair."),
+            ("Grants",        "Counts funded-in-progress PI/CoPI grants started this year, active through Q4."),
+            ("CH/CO",         "Counts active graduate chair/co-chair advisees (ongoing + current CV members)."),
+            ("CP",            "Counts conference papers published this year (best of FAR, CV, supplemental)."),
+            ("Journal",       "Counts refereed journal papers published this year (best of CV and supplemental)."),
+        ]
+        for name, desc in standard:
+            st.markdown(f"**{name}** — {desc}")
+
+    st.markdown("---")
+
+    # ── Active custom rules ────────────────────────────────────────────────────
+    rules = st.session_state["custom_rules"]
+    if rules:
+        st.markdown("**Active custom rules:**")
+        to_delete = []
+        for idx, cr in enumerate(rules):
+            with st.container():
+                ca, cb, cc = st.columns([2, 6, 1])
+                ca.markdown(f"**{cr['name']}**")
+                rt = cr.get("rule_type","")
+                sec = cr.get("section","") or "entire CV"
+                kw  = cr.get("keywords","")
+                yr  = cr.get("year","")
+                if rt == "Count all entries in section":
+                    cb.caption(f"{rt} · section: *{sec}*")
+                elif rt == "Count entries from a specific year":
+                    cb.caption(f"{rt} · section: *{sec}* · year: **{yr}**")
+                else:
+                    cb.caption(f"{rt} · section: *{sec}* · keywords: `{kw}`")
+                if cc.button("🗑️", key=f"del_{idx}"):
+                    to_delete.append(idx)
+        for idx in reversed(to_delete):
+            rules.pop(idx)
+        st.session_state["custom_rules"] = rules
+        st.markdown("---")
+
+    # ── Add new rule ───────────────────────────────────────────────────────────
+    st.markdown("**Add a custom rule:**")
+
+    col1, col2 = st.columns([1, 2])
+    with col1:
+        new_name = st.text_input("Column name in output",
+                                 placeholder="e.g. Invited Talks",
+                                 key="nr_name")
+        new_section = st.text_input("Look inside CV section (optional)",
+                                    placeholder="e.g. Invited Talks",
+                                    help="Leave blank to search the entire CV.",
+                                    key="nr_section")
+    with col2:
+        new_type = st.selectbox("Rule type", options=list(RULE_TYPES.keys()), key="nr_type")
+        st.caption(RULE_TYPES[new_type])
+
+    # Conditional fields based on rule type
+    new_keywords = ""
+    new_year = ""
+    if new_type == "Count entries from a specific year":
+        new_year = st.text_input("Year to count", placeholder="e.g. 2024", key="nr_year")
+    elif new_type != "Count all entries in section":
+        kw_label = {
+            "Count entries containing keyword":    "Keyword to match (one word or phrase)",
+            "Count entries matching ALL keywords":  "Keywords — ALL must match (comma-separated)",
+            "Count entries matching ANY keyword":   "Keywords — ANY can match (comma-separated)",
+            "Count entries NOT containing keyword": "Keyword to exclude",
+        }.get(new_type, "Keywords")
+        new_keywords = st.text_input(kw_label, placeholder="e.g. invited, talk", key="nr_kw")
+
+    if st.button("➕ Add Rule", type="primary"):
+        if not new_name.strip():
+            st.error("Please enter a column name.")
+        elif new_type == "Count entries from a specific year" and not new_year.strip():
+            st.error("Please enter a year.")
+        elif new_type != "Count all entries in section" and new_type != "Count entries from a specific year" and not new_keywords.strip():
+            st.error("Please enter at least one keyword.")
+        elif any(cr["name"] == new_name.strip() for cr in rules):
+            st.error(f"A rule named '{new_name.strip()}' already exists.")
+        else:
+            st.session_state["custom_rules"].append({
+                "name":      new_name.strip(),
+                "section":   new_section.strip(),
+                "rule_type": new_type,
+                "keywords":  new_keywords.strip(),
+                "year":      new_year.strip(),
+            })
+            st.success(f"✅ Rule '{new_name.strip()}' added.")
             st.rerun()
 
-    # Live preview of active custom rules
-    custom_preview = _parse_custom_rules(rules_text)
-    if custom_preview:
-        st.markdown("---")
-        st.markdown("**Active custom rules (will add columns to output):**")
-        for cr in custom_preview:
-            section_label = f"in section *{cr['section']}*" if cr["section"] else "across entire CV"
-            st.markdown(f"- **{cr['name']}** — count lines with `{cr['keyword']}` {section_label}")
-    else:
-        st.info("No active custom rules. Uncomment or add lines below the dashed separator to add one.")
+    # ── Quick-add examples ─────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("**Quick-add examples:**")
+    examples = [
+        ("Invited Talks",  "Invited Talks",     "Count all entries in section",          "",       ""),
+        ("Book Chapters",  "Book Chapters",      "Count all entries in section",          "",       ""),
+        ("Patents",        "Patents",            "Count all entries in section",          "",       ""),
+        ("Awards",         "Honors and Awards",  "Count entries containing keyword",      "award",  ""),
+        ("Editorials",     "Editorial",          "Count entries containing keyword",      "editor", ""),
+        ("2024 Talks",     "Invited Talks",      "Count entries from a specific year",    "",       "2024"),
+    ]
+    ex_cols = st.columns(len(examples))
+    for col, (name, section, rtype, kw, yr) in zip(ex_cols, examples):
+        with col:
+            st.markdown(f"**{name}**")
+            st.caption(f"_{rtype}_")
+            if st.button("Add", key=f"qadd_{name}"):
+                if not any(cr["name"] == name for cr in st.session_state["custom_rules"]):
+                    st.session_state["custom_rules"].append({
+                        "name": name, "section": section,
+                        "rule_type": rtype, "keywords": kw, "year": yr,
+                    })
+                    st.rerun()
 
 
