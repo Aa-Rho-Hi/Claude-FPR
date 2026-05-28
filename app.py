@@ -270,42 +270,56 @@ Now extract the data and return ONLY the JSON object."""
         ],
         "temperature": 0,
         "max_tokens": 1200,
+        "stream": False,          # explicitly disable streaming
     }
+
+    def _parse_sse_content(text: str) -> str:
+        """
+        Reassemble content from a Server-Sent Events stream.
+        Each line looks like:  data: {"choices":[{"delta":{"content":"..."}}]}
+        """
+        content_parts = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line.startswith("data:"):
+                continue
+            payload_str = line[5:].strip()
+            if payload_str == "[DONE]":
+                break
+            try:
+                chunk = json.loads(payload_str)
+                delta = (chunk.get("choices") or [{}])[0].get("delta") or {}
+                part = delta.get("content") or ""
+                if part:
+                    content_parts.append(part)
+            except Exception:
+                continue
+        return "".join(content_parts)
 
     try:
         resp = _requests.post(endpoint, json=payload, headers=headers, timeout=90)
 
-        # Always show raw response for debugging
-        st.info(f"📡 {last_name}: HTTP {resp.status_code}")
+        if not resp.ok:
+            st.warning(f"⚠️ {last_name}: AI API returned {resp.status_code} — {resp.text[:200]}. Falling back.")
+            return None
+
+        # Try standard JSON parse first; fall back to SSE reassembly
+        content = ""
         try:
             resp_json = resp.json()
-            st.json(resp_json)          # ← visible in the UI so we can see what came back
+            choices = resp_json.get("choices") or []
+            if choices:
+                message = choices[0].get("message") or {}
+                content = message.get("content") or ""
         except Exception:
-            st.error(f"Raw response (not JSON): {resp.text[:500]}")
-            return None
+            pass   # not JSON — likely SSE stream
 
-        if not resp.ok:
-            st.warning(f"⚠️ {last_name}: API error {resp.status_code}. Falling back.")
-            return None
-
-        # Navigate choices safely — handle variations in response shape
-        choices = resp_json.get("choices") or []
-        if not choices:
-            st.warning(f"⚠️ {last_name}: No 'choices' in response. Falling back.")
-            return None
-
-        first_choice = choices[0]
-        # Some endpoints use message.content, others use text directly
-        message = first_choice.get("message") or {}
-        content = (message.get("content")
-                   or first_choice.get("text")
-                   or "")
-        finish_reason = first_choice.get("finish_reason", "")
-
-        st.write(f"finish_reason: `{finish_reason}` | content length: {len(content)}")
+        # If content still empty, attempt SSE reassembly
+        if not content and "data:" in resp.text:
+            content = _parse_sse_content(resp.text)
 
         if not content:
-            st.warning(f"⚠️ {last_name}: Empty content from AI (finish_reason={finish_reason}). Falling back.")
+            st.warning(f"⚠️ {last_name}: AI returned empty content. Falling back.")
             return None
 
         raw = content.strip()
