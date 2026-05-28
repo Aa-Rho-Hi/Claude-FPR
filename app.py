@@ -276,7 +276,8 @@ Now extract the data and return ONLY the JSON object."""
     def _parse_sse_content(text: str) -> str:
         """
         Reassemble content from a Server-Sent Events stream.
-        Each line looks like:  data: {"choices":[{"delta":{"content":"..."}}]}
+        TAMU sends metadata chunks + [DONE] early, then the real content chunks follow.
+        So we do NOT stop at [DONE] — we collect delta.content from every chunk.
         """
         content_parts = []
         for line in text.splitlines():
@@ -285,7 +286,7 @@ Now extract the data and return ONLY the JSON object."""
                 continue
             payload_str = line[5:].strip()
             if payload_str == "[DONE]":
-                break
+                continue   # skip but don't stop — real content may follow
             try:
                 chunk = json.loads(payload_str)
                 delta = (chunk.get("choices") or [{}])[0].get("delta") or {}
