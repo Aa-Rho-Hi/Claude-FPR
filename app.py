@@ -561,7 +561,7 @@ with st.sidebar:
     output_filename = st.text_input("Output filename", value="far_extraction_output.xlsx")
 
     st.markdown("---")
-    st.markdown("#### 🤖 AI Extraction (Option B)")
+    st.markdown("#### 🤖 AI Extraction")
     st.caption(
         "Standard fields (UG, Grad, MS, PhD, etc.) always use the accurate "
         "rule-based pipeline. Provide an API key to power **custom rules** "
