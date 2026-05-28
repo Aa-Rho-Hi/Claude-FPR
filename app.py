@@ -1,5 +1,5 @@
 import streamlit as st
-import tempfile, os, glob, re, sys, io
+import tempfile, os, glob, re, sys, io, json
 from datetime import date
 
 st.set_page_config(
@@ -177,6 +177,149 @@ def _parse_custom_rules(text):
             "year":      year,
         })
     return rules
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AI-interpreted extraction (Option B)
+# ══════════════════════════════════════════════════════════════════════════════
+
+_AI_SYSTEM_PROMPT = """\
+You are a precise data-extraction assistant for faculty annual reports.
+You will be given extraction rules and raw text from a faculty member's documents.
+Follow the rules exactly and return ONLY a valid JSON object — no prose, no markdown fences.
+
+Required JSON keys (use null if genuinely not found):
+  last_name    : string
+  first_name   : string
+  title        : string  (Professor | Associate Professor | Assistant Professor)
+  ug           : integer (undergrad course count)
+  grad         : integer (grad course count)
+  ms           : integer (MS/MSEN graduated, chair only)
+  phd          : integer (PhD graduated, chair only)
+  grants       : integer (funded grants where faculty is PI or CoPI)
+  ch_co        : integer (current doctoral advisees: Chair + Co-Chair)
+  cp           : integer (conference proceeding papers)
+  journal      : integer (refereed journal papers)
+
+If the rules define CUSTOM fields, include those keys too with integer values.
+Never hallucinate counts. When uncertain, use 0 for counts and null for text fields.
+"""
+
+def extract_with_ai(
+    rules_text: str,
+    last_name: str,
+    far_text: str,
+    cv_text: str,
+    xlsx_summary: str,
+    custom_rules: list,
+    api_key: str,
+    base_url: str | None = None,
+    model: str = "gpt-4o",
+) -> dict | None:
+    """
+    Send rules + document text to an OpenAI-compatible LLM and parse the JSON result.
+    Returns a result dict matching run_rules.extract_faculty() output, or None on failure.
+    """
+    try:
+        from openai import OpenAI
+    except ImportError:
+        st.error("openai package is not installed. Add `openai>=1.0.0` to requirements.txt.")
+        return None
+
+    # Build the user message
+    custom_rule_block = ""
+    if custom_rules:
+        lines = ["\n\nCUSTOM FIELDS (also include these as integer keys in your JSON):"]
+        for cr in custom_rules:
+            sec = f"in section '{cr['section']}'" if cr["section"] else "across entire document"
+            lines.append(f"  - key: \"{cr['name']}\" — {cr['rule_type']} {sec}"
+                         + (f", keywords: {cr['keywords']}" if cr.get("keywords") else "")
+                         + (f", year: {cr['year']}" if cr.get("year") else ""))
+        custom_rule_block = "\n".join(lines)
+
+    user_msg = f"""\
+=== EXTRACTION RULES ===
+{rules_text}
+{custom_rule_block}
+
+=== FACULTY: {last_name} ===
+
+--- FAR PDF TEXT ---
+{far_text[:12000]}
+
+--- CV PDF TEXT ---
+{cv_text[:6000]}
+
+--- SUPPLEMENTAL WORKBOOK DATA ---
+{xlsx_summary[:3000] if xlsx_summary else "(not provided)"}
+
+Now extract the data and return ONLY the JSON object."""
+
+    client_kwargs = {"api_key": api_key}
+    if base_url and base_url.strip():
+        client_kwargs["base_url"] = base_url.strip()
+
+    try:
+        client = OpenAI(**client_kwargs)
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": _AI_SYSTEM_PROMPT},
+                {"role": "user",   "content": user_msg},
+            ],
+            temperature=0,
+            max_tokens=800,
+        )
+        raw = response.choices[0].message.content.strip()
+        # Strip markdown fences if the model added them despite instructions
+        raw = re.sub(r'^```(?:json)?\s*', '', raw, flags=re.I)
+        raw = re.sub(r'\s*```$', '', raw)
+        data = json.loads(raw)
+
+        # Normalise to match run_rules result dict format
+        result = {
+            "last_name":  str(data.get("last_name",  last_name)),
+            "first_name": str(data.get("first_name", "")),
+            "title":      str(data.get("title",      "")),
+            "ug":         int(data.get("ug",      0) or 0),
+            "grad":       int(data.get("grad",    0) or 0),
+            "ms":         int(data.get("ms",      0) or 0),
+            "phd":        int(data.get("phd",     0) or 0),
+            "grants":     int(data.get("grants",  0) or 0),
+            "ch_co":      int(data.get("ch_co",   0) or 0),
+            "cp":         int(data.get("cp",      0) or 0),
+            "journal":    int(data.get("journal", 0) or 0),
+        }
+        # Custom fields
+        for cr in custom_rules:
+            result[cr["name"]] = int(data.get(cr["name"], 0) or 0)
+
+        return result
+
+    except json.JSONDecodeError as e:
+        st.warning(f"⚠️ {last_name}: AI returned invalid JSON — {e}. Falling back to rule-based extraction.")
+        return None
+    except Exception as e:
+        st.warning(f"⚠️ {last_name}: AI extraction failed — {e}. Falling back to rule-based extraction.")
+        return None
+
+
+def _xlsx_to_summary(xlsx_path: str) -> str:
+    """Convert an XLSX file to a plain-text summary for the AI prompt."""
+    try:
+        import openpyxl
+        wb = openpyxl.load_workbook(xlsx_path, data_only=True)
+        lines = []
+        for sheet_name in wb.sheetnames[:3]:  # max 3 sheets
+            ws = wb[sheet_name]
+            lines.append(f"[Sheet: {sheet_name}]")
+            for row in ws.iter_rows(max_row=60, values_only=True):
+                row_str = "\t".join(str(c) if c is not None else "" for c in row)
+                if row_str.strip():
+                    lines.append(row_str)
+        return "\n".join(lines)
+    except Exception:
+        return ""
 
 
 # ── Default rule editor text ───────────────────────────────────────────────────
@@ -362,6 +505,34 @@ ADD YOUR RULES HERE
 with st.sidebar:
     st.header("⚙️ Settings")
     output_filename = st.text_input("Output filename", value="far_extraction_output.xlsx")
+
+    st.markdown("---")
+    st.markdown("#### 🤖 AI Extraction (Option B)")
+    st.caption(
+        "Provide an API key to let an AI model read the Rules Editor text and "
+        "extract values directly. Leave blank to use the built-in rule-based engine."
+    )
+    ai_api_key = st.text_input(
+        "AI API Key",
+        type="password",
+        placeholder="sk-… or your TAMU key",
+        help="OpenAI-compatible API key. When provided, the AI reads your rules and performs extraction.",
+    )
+    ai_base_url = st.text_input(
+        "API Base URL (optional)",
+        placeholder="https://api.openai.com/v1",
+        help="Leave blank for OpenAI. For TAMU or other providers, paste their endpoint URL here.",
+    )
+    ai_model = st.text_input(
+        "Model name",
+        value="protected.gpt-5",
+        help="Model to use for AI extraction. For TAMU: protected.gpt-5. For OpenAI: gpt-4o.",
+    )
+    if ai_api_key:
+        st.success("🟢 AI extraction enabled")
+    else:
+        st.info("🔵 Rule-based extraction (no API key)")
+
     st.markdown("---")
     st.markdown("**Expected file naming:**")
     st.code(
@@ -474,6 +645,10 @@ with tab_upload:
 
             st.markdown("---")
             st.subheader("Results")
+            if ai_api_key:
+                st.caption("🤖 AI extraction is active — rules text is sent to the AI model for interpretation.")
+            else:
+                st.caption("🔵 Rule-based extraction — using built-in pipeline.")
             progress  = st.progress(0, text="Starting…")
             log_area  = st.empty()
             results   = []
@@ -484,26 +659,55 @@ with tab_upload:
                 log_lines.append(f"⏳ **{last_name}**…")
                 log_area.markdown("\n\n".join(log_lines))
 
-                old_stdout = sys.stdout
-                sys.stdout = io.StringIO()
-                try:
-                    r = rr.extract_faculty(
-                        last_name,
-                        input_dir=tmpdir,
-                        api_key=None,
-                        all_far_data=all_far_data,
-                    )
-                except Exception as e:
-                    r = None
-                    log_lines[-1] = f"❌ **{last_name}** — {e}"
-                finally:
-                    sys.stdout = old_stdout
+                r = None
 
-                # Run custom rules
-                if r and custom_rules:
-                    cv_text = all_far_data.get(last_name, (None, ""))[1]
-                    for cr in custom_rules:
-                        r[cr["name"]] = _run_custom_rule(cv_text, cr)
+                # ── Try AI extraction if API key provided ──────────────────
+                if ai_api_key:
+                    far_text_ai = all_far_data.get(last_name, (None, ""))[1]
+                    cv_path_ai  = os.path.join(tmpdir, f"{last_name} CV.pdf")
+                    cv_text_ai  = ""
+                    if os.path.exists(cv_path_ai):
+                        try:
+                            cv_text_ai = rr.pdf_full_text(cv_path_ai)
+                        except Exception:
+                            pass
+                    xlsx_path_ai = os.path.join(tmpdir, f"{last_name}.xlsx")
+                    xlsx_summary_ai = _xlsx_to_summary(xlsx_path_ai) if os.path.exists(xlsx_path_ai) else ""
+
+                    r = extract_with_ai(
+                        rules_text      = rules_text,
+                        last_name       = last_name,
+                        far_text        = far_text_ai,
+                        cv_text         = cv_text_ai,
+                        xlsx_summary    = xlsx_summary_ai,
+                        custom_rules    = custom_rules,
+                        api_key         = ai_api_key,
+                        base_url        = ai_base_url if ai_base_url else None,
+                        model           = ai_model or "gpt-4o",
+                    )
+
+                # ── Fallback: rule-based extraction ───────────────────────
+                if r is None:
+                    old_stdout = sys.stdout
+                    sys.stdout = io.StringIO()
+                    try:
+                        r = rr.extract_faculty(
+                            last_name,
+                            input_dir=tmpdir,
+                            api_key=None,
+                            all_far_data=all_far_data,
+                        )
+                    except Exception as e:
+                        r = None
+                        log_lines[-1] = f"❌ **{last_name}** — {e}"
+                    finally:
+                        sys.stdout = old_stdout
+
+                    # Run custom rules on top of rule-based result
+                    if r and custom_rules:
+                        cv_text = all_far_data.get(last_name, (None, ""))[1]
+                        for cr in custom_rules:
+                            r[cr["name"]] = _run_custom_rule(cv_text, cr)
 
                 if r:
                     results.append(r)
