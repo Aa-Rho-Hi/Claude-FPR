@@ -269,7 +269,7 @@ Now extract the data and return ONLY the JSON object."""
             {"role": "user",   "content": user_msg},
         ],
         "temperature": 0,
-        "max_tokens": 1200,
+        "max_tokens": 6000,       # reasoning model needs tokens for thinking + output
         "stream": False,          # explicitly disable streaming
     }
 
@@ -295,31 +295,39 @@ Now extract the data and return ONLY the JSON object."""
             raw_lines_seen.append(raw_line)
 
             if not raw_line.startswith("data:"):
+                # May be plain JSON (non-streaming response delivered as one line)
+                if raw_line.startswith("{"):
+                    try:
+                        obj = json.loads(raw_line)
+                        choice  = (obj.get("choices") or [{}])[0]
+                        message = choice.get("message") or {}
+                        part    = message.get("content") or ""
+                        # Also check streaming delta format
+                        if not part:
+                            delta = choice.get("delta") or {}
+                            part  = delta.get("content") or ""
+                        if part:
+                            content_parts.append(part)
+                    except Exception:
+                        pass
                 continue
+
             payload_str = raw_line[5:].strip()
             if payload_str == "[DONE]":
                 continue          # TAMU may emit [DONE] mid-stream; keep going
             try:
-                chunk = json.loads(payload_str)
-                # Standard OpenAI streaming delta format
-                delta = (chunk.get("choices") or [{}])[0].get("delta") or {}
-                part  = delta.get("content") or ""
+                chunk  = json.loads(payload_str)
+                choice = (chunk.get("choices") or [{}])[0]
+                # Handle both streaming (delta) and non-streaming (message) formats
+                message = choice.get("message") or {}
+                delta   = choice.get("delta")   or {}
+                part    = message.get("content") or delta.get("content") or ""
                 if part:
                     content_parts.append(part)
             except Exception:
                 continue
 
         content = "".join(content_parts)
-
-        # Last-resort: maybe response was plain JSON (non-streaming)
-        if not content:
-            full_text = "\n".join(raw_lines_seen)
-            try:
-                resp_json = json.loads(full_text)
-                message = (resp_json.get("choices") or [{}])[0].get("message") or {}
-                content = message.get("content") or ""
-            except Exception:
-                pass
 
         if not content:
             # Show what we actually received to help diagnose
