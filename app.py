@@ -183,90 +183,178 @@ def _parse_custom_rules(text):
 DEFAULT_RULES_TEXT = """\
 Faculty Annual Report Extraction Rules
 =======================================
-Use these rules to control what the pipeline counts for each faculty member.
-Standard rules always run. Add your own custom rules at the bottom.
+Use these rules exactly and conservatively.
+Standard rules always run. Scroll to the bottom to add your own custom rules.
 
 
-STANDARD RULES  (always applied)
-----------------------------------
-These run automatically and cannot be removed.
+Processing Workflow
+--------------------
+1. Upload all FAR PDFs, CV PDFs, and supplemental XLSX files together.
+2. Select which faculty to process (all detected, or specific names).
+3. Click Run Extraction. Each faculty member is processed in order.
+4. Download the output Excel workbook when processing is complete.
+5. The Excel workbook contains 3 sheets: Summary, Teaching & Advising,
+   and Research & Publications.
 
-1. UG Courses
-   Count the number of distinct undergraduate courses (course number below 500)
-   taught during the report year.
 
-2. Grad Courses
-   Count the number of distinct graduate courses (course number 500 or above)
-   taught during the report year.
+Global Instructions
+--------------------
+1. Supplemental data is authoritative when present for fields where these
+   rules allow supplemental values.
+2. When multiple sources disagree, follow the metric-specific priority rules
+   defined below instead of strictly preferring the PDF.
+3. If a row is incomplete, do not count it unless the relevant rule explicitly
+   allows it.
+4. When a table column appears wrapped or shifted onto a nearby line, reconstruct
+   the row conservatively before deciding that a field is missing.
+5. In Graduate Advising, inspect the far-right Role column carefully — Chair or
+   Co-Chair may appear detached from the rest of the row.
+6. If evidence is ambiguous, exclude it from counts.
+7. Keep all count fields as integers. Use 0 for missing numeric fields only when
+   absence is confirmed. Use empty strings for missing text fields.
+8. Extraction failure is not evidence of absence. A blank field caused by a
+   known PDF extraction issue is different from a field that is genuinely
+   missing. Attempt repair before treating a blank as absent.
 
-3. MS Graduated
-   Count MS/MEN students who graduated during the report year with this faculty
-   member as committee chair.
+
+Companion CV Usage
+-------------------
+1. The companion CV is supplemental only.
+2. Use the CV only for metrics whose field rules explicitly allow CV evidence.
+3. For Courses, Faculty Names, and Titles, do not add or override values
+   from the CV.
+4. For Publications, Grants, and Graduate Advising counts, the CV may be used
+   as additional evidence when the field rule says so. De-duplicate matching
+   entries by normalised title, name, and year before counting.
+5. Use only dedicated CV sections:
+   - Publications: Peer-Reviewed Journal Articles, Refereed Conference
+     Proceedings, or equivalent complete publication lists.
+   - Grants: Research Funding, Extramural Funding, Grants, Sponsored Projects,
+     or equivalent complete funding lists.
+   - Students: Current Students, Graduate Student Committee Chair, Theses,
+     Dissertations, or equivalent advising lists.
+
+
+Supplemental Workbook Usage
+-----------------------------
+1. Titles: always use supplemental workbook values where allowed.
+2. CH/CO: always use supplemental workbook value. Do NOT reconstruct from
+   Graduate Advising.
+3. Publications (CP Totals, Refereed Journal Papers):
+   Use max(annual-report + allowed CV count, supplemental workbook count).
+4. Grants: always use supplemental workbook values for External and Internal
+   grants when present.
+5. MS/MSEN and PhD graduates: use annual-report row-level counting. Use a
+   supplemental value only when the annual-report table is demonstrably
+   incomplete (missing roles, truncated, or missing rows).
+6. Courses: use annual report only.
+
+
+Field Rules
+------------
+1. Faculty Last Name, First Name, Title
+   Extract from the top section of the FAR PDF.
+   Normalise academic ranks: output "Professor", "Associate Professor", or
+   "Assistant Professor" only — remove endowed chair names, center roles,
+   and administrative titles.
+
+2. UG Courses
+   Source: Teaching section of the FAR PDF.
+   Count distinct course numbers below 500 taught during the report year.
+   Exclude course numbers 485, 491, 681, 684, 685, and 691.
+   Exclude independent study, research, thesis, dissertation, seminar,
+   internship, and special-problem courses.
+   Treat a lecture and its companion lab/design-lab/honors row as one course.
+
+3. Grad Courses
+   Source: Teaching section of the FAR PDF.
+   Count distinct course numbers 500 or above taught during the report year.
+   Apply the same exclusions as UG Courses.
 
 4. PhD Graduated
-   Count PhD students who graduated during the report year with this faculty
-   member as committee chair.
+   Source: Graduate Advising table, annual report only.
+   Count rows where Degree = PhD, Role = Chair, and Graduation Date is in
+   the report year.
+   Do not count Member, Co-Chair, or blank-role rows.
 
-5. Grants
-   Count funded, in-progress grants where faculty is PI or Co-PI, that started
-   during the report year and are still active through October.
+5. MS/MSEN Graduated
+   Source: Graduate Advising table; supplemental workbook only if the table
+   is demonstrably incomplete.
+   Count rows where Degree = MS or MSEN, Role = Chair, and Graduation Date
+   is in the report year.
+   Confirm against companion CV advising section when available.
 
-6. CH/CO
-   Count active graduate students for whom this faculty member is the chair or
-   co-chair of the thesis or dissertation committee.
+6. Total Grants
+   Source: supplemental workbook when present; otherwise annual report and
+   dedicated CV funding sections.
+   Count grants where faculty is PI or Co-PI, status is Funded/Active/Awarded,
+   and start date is in the report year.
+   Gifts count as grants when they have an identified sponsor and a 2024 date.
+   Exclude proposals that are only In Preparation, Submitted, or Pending.
 
-7. CP
-   Count conference papers published during the report year (takes the highest
-   count across the FAR, CV, and supplemental spreadsheet).
+7. CH/CO
+   Source: always use supplemental workbook value.
+   If supplemental is missing, count current doctoral advisees from Graduate
+   Advising (Role = Chair or Co-Chair, End Semester = Ongoing) plus CV
+   current-student sections.
 
-8. Journal
-   Count refereed journal papers published during the report year (takes the
-   highest count across the CV and supplemental spreadsheet).
+8. CP Totals
+   Source: max(annual-report conference entries, CV conference list,
+   supplemental workbook count).
+   Count conference proceeding entries whose venue year is the report year
+   and faculty appears in the author list.
+   Include accepted/to-appear entries at the top of a reverse-chronological
+   CV list.
+
+9. Refereed Journal Papers
+   Source: max(annual-report journal entries, CV journal list,
+   supplemental workbook count).
+   Count peer-reviewed journal entries whose publication year is the report
+   year and faculty appears in the author list.
+   Do not count arXiv preprints.
+   Do not count conference papers misclassified under journal sections.
 
 
-CUSTOM RULES  (add your own below)
-------------------------------------
-To add a new column to the output, write a rule using this format:
+CUSTOM RULES  (add your own below this line)
+=============================================
+To add a new column to the output Excel, write a rule using this format:
 
-   Rule name:  [what to call this column in the output Excel]
-   Look in:    [section heading in the CV — leave blank to search the entire document]
-   Count:      [what to count — choose one of the options below]
+   Rule name:  [column label in the output]
+   Look in:    [section heading in the CV — leave blank to search entire document]
+   Count:      [choose one option below]
 
 Count options:
-   all entries              — count every numbered item in the section
-   contains: word           — count items that include this word or phrase
-   year: 2024               — count items that mention a specific year
-   any of: word1, word2     — count items containing at least one of these words
-   all of: word1, word2     — count items that contain every one of these words
-   excludes: word           — count items that do NOT contain this word
+   all entries              — every numbered item in the section
+   contains: word           — items that include this word or phrase
+   year: 2024               — items that mention a specific year
+   any of: word1, word2     — items with at least one of these words (OR)
+   all of: word1, word2     — items with every one of these words (AND)
+   excludes: word           — items that do NOT contain this word
 
+Examples (remove the leading # to activate):
+   # Rule name:  Invited Talks
+   # Look in:    Invited Talks
+   # Count:      all entries
 
-EXAMPLES  (copy, edit, and add below the line to activate)
-------------------------------------------------------------
-   Rule name:  Invited Talks
-   Look in:    Invited Talks
-   Count:      all entries
+   # Rule name:  Book Chapters
+   # Look in:    Book Chapters
+   # Count:      all entries
 
-   Rule name:  Book Chapters
-   Look in:    Book Chapters
-   Count:      all entries
+   # Rule name:  Patents
+   # Look in:    Patents
+   # Count:      all entries
 
-   Rule name:  Patents
-   Look in:    Patents
-   Count:      all entries
+   # Rule name:  Awards
+   # Look in:    Honors and Awards
+   # Count:      contains: award
 
-   Rule name:  Awards
-   Look in:    Honors and Awards
-   Count:      contains: award
-
-   Rule name:  2024 Talks
-   Look in:    Invited Talks
-   Count:      year: 2024
-
+   # Rule name:  2024 Conference Talks
+   # Look in:    Invited Talks
+   # Count:      year: 2024
 
 ADD YOUR RULES HERE
 ====================
-(write your rules below this line — follow the format shown above)
+(write your custom rules below — follow the format above)
 
 """
 
