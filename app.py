@@ -274,24 +274,40 @@ Now extract the data and return ONLY the JSON object."""
 
     try:
         resp = _requests.post(endpoint, json=payload, headers=headers, timeout=90)
-        if not resp.ok:
-            st.warning(f"⚠️ {last_name}: AI API returned {resp.status_code} — {resp.text[:300]}. Falling back.")
+
+        # Always show raw response for debugging
+        st.info(f"📡 {last_name}: HTTP {resp.status_code}")
+        try:
+            resp_json = resp.json()
+            st.json(resp_json)          # ← visible in the UI so we can see what came back
+        except Exception:
+            st.error(f"Raw response (not JSON): {resp.text[:500]}")
             return None
 
-        resp_json = resp.json()
+        if not resp.ok:
+            st.warning(f"⚠️ {last_name}: API error {resp.status_code}. Falling back.")
+            return None
 
-        # Debug: show raw response so we can diagnose format issues
-        with st.expander(f"🔍 Debug — raw API response for {last_name}", expanded=False):
-            st.json(resp_json)
-
-        # Navigate choices safely
+        # Navigate choices safely — handle variations in response shape
         choices = resp_json.get("choices") or []
         if not choices:
-            st.warning(f"⚠️ {last_name}: AI response had no choices — {str(resp_json)[:300]}. Falling back.")
+            st.warning(f"⚠️ {last_name}: No 'choices' in response. Falling back.")
             return None
 
-        message = choices[0].get("message") or {}
-        content = message.get("content") or ""
+        first_choice = choices[0]
+        # Some endpoints use message.content, others use text directly
+        message = first_choice.get("message") or {}
+        content = (message.get("content")
+                   or first_choice.get("text")
+                   or "")
+        finish_reason = first_choice.get("finish_reason", "")
+
+        st.write(f"finish_reason: `{finish_reason}` | content length: {len(content)}")
+
+        if not content:
+            st.warning(f"⚠️ {last_name}: Empty content from AI (finish_reason={finish_reason}). Falling back.")
+            return None
+
         raw = content.strip()
 
         # Strip markdown fences if the model added them despite instructions
