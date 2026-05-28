@@ -218,13 +218,10 @@ def extract_with_ai(
 ) -> dict | None:
     """
     Send rules + document text to an OpenAI-compatible LLM and parse the JSON result.
+    Uses requests directly so it works with any OpenAI-compatible endpoint (including TAMU).
     Returns a result dict matching run_rules.extract_faculty() output, or None on failure.
     """
-    try:
-        from openai import OpenAI
-    except ImportError:
-        st.error("openai package is not installed. Add `openai>=1.0.0` to requirements.txt.")
-        return None
+    import requests as _requests
 
     # Build the user message
     custom_rule_block = ""
@@ -255,22 +252,35 @@ def extract_with_ai(
 
 Now extract the data and return ONLY the JSON object."""
 
-    client_kwargs = {"api_key": api_key}
+    # Determine endpoint — append /chat/completions to whatever base URL is given
     if base_url and base_url.strip():
-        client_kwargs["base_url"] = base_url.strip()
+        endpoint = base_url.rstrip("/") + "/chat/completions"
+    else:
+        endpoint = "https://api.openai.com/v1/chat/completions"
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": _AI_SYSTEM_PROMPT},
+            {"role": "user",   "content": user_msg},
+        ],
+        "temperature": 0,
+        "max_tokens": 1200,
+    }
 
     try:
-        client = OpenAI(**client_kwargs)
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": _AI_SYSTEM_PROMPT},
-                {"role": "user",   "content": user_msg},
-            ],
-            temperature=0,
-            max_tokens=800,
-        )
-        raw = response.choices[0].message.content.strip()
+        resp = _requests.post(endpoint, json=payload, headers=headers, timeout=90)
+        if not resp.ok:
+            st.warning(f"⚠️ {last_name}: AI API returned {resp.status_code} — {resp.text[:300]}. Falling back.")
+            return None
+
+        resp_json = resp.json()
+        raw = resp_json["choices"][0]["message"]["content"].strip()
+
         # Strip markdown fences if the model added them despite instructions
         raw = re.sub(r'^```(?:json)?\s*', '', raw, flags=re.I)
         raw = re.sub(r'\s*```$', '', raw)
