@@ -184,25 +184,14 @@ def _parse_custom_rules(text):
 # ══════════════════════════════════════════════════════════════════════════════
 
 _AI_SYSTEM_PROMPT = """\
-You are a precise data-extraction assistant for faculty annual reports.
-You will be given extraction rules and raw text from a faculty member's documents.
-Follow the rules exactly and return ONLY a valid JSON object — no prose, no markdown fences.
+Extract faculty metrics from annual report documents. Return ONLY a JSON object, no prose.
 
-Required JSON keys (use null if genuinely not found):
-  last_name    : string
-  first_name   : string
-  title        : string  (Professor | Associate Professor | Assistant Professor)
-  ug           : integer (undergrad course count)
-  grad         : integer (grad course count)
-  ms           : integer (MS/MSEN graduated, chair only)
-  phd          : integer (PhD graduated, chair only)
-  grants       : integer (funded grants where faculty is PI or CoPI)
-  ch_co        : integer (current doctoral advisees: Chair + Co-Chair)
-  cp           : integer (conference proceeding papers)
-  journal      : integer (refereed journal papers)
+JSON keys required:
+last_name, first_name, title (Professor/Associate Professor/Assistant Professor),
+ug (int), grad (int), ms (int), phd (int), grants (int), ch_co (int), cp (int), journal (int)
 
-If the rules define CUSTOM fields, include those keys too with integer values.
-Never hallucinate counts. When uncertain, use 0 for counts and null for text fields.
+Rules: count conservatively, integers only, 0 when absent, null for missing text fields.
+Include any CUSTOM keys defined in the rules.
 """
 
 def extract_with_ai(
@@ -235,22 +224,22 @@ def extract_with_ai(
         custom_rule_block = "\n".join(lines)
 
     user_msg = f"""\
-=== EXTRACTION RULES ===
-{rules_text}
+RULES:
+{rules_text[:3000]}
 {custom_rule_block}
 
-=== FACULTY: {last_name} ===
+FACULTY: {last_name}
 
---- FAR PDF TEXT ---
-{far_text[:12000]}
+FAR TEXT:
+{far_text[:5000]}
 
---- CV PDF TEXT ---
-{cv_text[:6000]}
+CV TEXT:
+{cv_text[:3000]}
 
---- SUPPLEMENTAL WORKBOOK DATA ---
-{xlsx_summary[:3000] if xlsx_summary else "(not provided)"}
+SUPPLEMENTAL:
+{xlsx_summary[:1500] if xlsx_summary else "(none)"}
 
-Now extract the data and return ONLY the JSON object."""
+Return ONLY the JSON object."""
 
     # Determine endpoint — append /chat/completions to whatever base URL is given
     if base_url and base_url.strip():
@@ -268,9 +257,8 @@ Now extract the data and return ONLY the JSON object."""
             {"role": "system", "content": _AI_SYSTEM_PROMPT},
             {"role": "user",   "content": user_msg},
         ],
-        "temperature": 0,
-        "max_tokens": 6000,       # reasoning model needs tokens for thinking + output
-        "stream": False,          # explicitly disable streaming
+        "max_completion_tokens": 16000,  # reasoning model: thinking + output budget
+        "stream": False,                 # explicitly disable streaming
     }
 
     try:
