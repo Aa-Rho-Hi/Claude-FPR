@@ -101,64 +101,173 @@ def _run_custom_rule(cv_text, cr):
 
 
 def _parse_custom_rules(text):
-    """Legacy text-format parser — kept for backward compatibility with saved rules."""
+    """
+    Parse plain-English rules from the Rules Editor text area.
+    Looks for blocks of:
+        Rule name:  ...
+        Look in:    ...   (optional)
+        Count:      ...
+    Only parses rules that appear AFTER the 'ADD YOUR RULES HERE' marker.
+    """
     rules = []
-    STANDARD = {"ug courses","grad courses","ms graduated","phd graduated",
-                 "grants","ch/co","cp","journal"}
-    for line in text.split("\n"):
-        line = line.strip()
-        if not line or line.startswith("#"):
+    # Only look at text after the user-rules marker
+    marker = "ADD YOUR RULES HERE"
+    idx = text.upper().find(marker.upper())
+    if idx >= 0:
+        text = text[idx + len(marker):]
+
+    # Split into candidate rule blocks by finding "Rule name:" anchors
+    blocks = re.split(r'(?im)^\s*rule\s+name\s*:', text)
+    for block in blocks[1:]:  # first element is text before first rule
+        lines = [l.strip() for l in block.strip().split("\n") if l.strip()]
+        if not lines:
             continue
-        parts = [p.strip() for p in line.split("|")]
-        if len(parts) != 3:
+
+        name    = lines[0].strip()
+        section = ""
+        count   = ""
+
+        for line in lines[1:]:
+            ll = line.lower()
+            if ll.startswith("look in:"):
+                section = line.split(":", 1)[1].strip()
+            elif ll.startswith("count:"):
+                count = line.split(":", 1)[1].strip()
+
+        if not name or not count:
             continue
-        name, section, keyword = parts
-        if not name or not keyword:
-            continue
-        if name.lower() in STANDARD:
-            continue
+
+        # Interpret the count instruction
+        cl = count.lower()
+        if cl.startswith("all entries") or cl == "all":
+            rule_type = "Count all entries in section"
+            keywords  = ""
+            year      = ""
+        elif cl.startswith("year:"):
+            rule_type = "Count entries from a specific year"
+            keywords  = ""
+            year      = count.split(":", 1)[1].strip()
+        elif cl.startswith("any of:"):
+            rule_type = "Count entries matching ANY keyword"
+            keywords  = count.split(":", 1)[1].strip()
+            year      = ""
+        elif cl.startswith("all of:"):
+            rule_type = "Count entries matching ALL keywords"
+            keywords  = count.split(":", 1)[1].strip()
+            year      = ""
+        elif cl.startswith("excludes:") or cl.startswith("exclude:"):
+            rule_type = "Count entries NOT containing keyword"
+            keywords  = count.split(":", 1)[1].strip()
+            year      = ""
+        elif cl.startswith("contains:"):
+            rule_type = "Count entries containing keyword"
+            keywords  = count.split(":", 1)[1].strip()
+            year      = ""
+        else:
+            # Fallback: treat the whole count value as a keyword
+            rule_type = "Count entries containing keyword"
+            keywords  = count
+            year      = ""
+
         rules.append({
             "name":      name,
             "section":   section,
-            "rule_type": "Count entries containing keyword",
-            "keywords":  keyword,
-            "year":      "",
+            "rule_type": rule_type,
+            "keywords":  keywords,
+            "year":      year,
         })
     return rules
 
 
 # ── Default rule editor text ───────────────────────────────────────────────────
 DEFAULT_RULES_TEXT = """\
-# ─────────────────────────────────────────────────────────────────────────────
-# STANDARD RULES  (always applied — edit descriptions for reference only)
-# ─────────────────────────────────────────────────────────────────────────────
+Faculty Annual Report Extraction Rules
+=======================================
+Use these rules to control what the pipeline counts for each faculty member.
+Standard rules always run. Add your own custom rules at the bottom.
 
-UG Courses       | Counts distinct undergrad course numbers (below the UG ceiling) taught this year.
-Grad Courses     | Counts distinct graduate course numbers (at or above the UG ceiling) taught this year.
-MS Graduated     | Counts MS/MEN students who graduated this year with faculty as chair.
-PhD Graduated    | Counts PhD students who graduated this year with faculty as chair.
-Grants           | Counts funded-in-progress PI/CoPI grants that started this year and are active through Q4.
-CH/CO            | Counts active graduate chair/co-chair advisees (ongoing + current CV members).
-CP               | Counts conference papers published this year (best of FAR, CV, and supplemental).
-Journal          | Counts refereed journal papers published this year (best of CV and supplemental).
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CUSTOM RULES  (add your own below — one rule per line)
-# Format:  Column Name  |  Section in CV to search  |  Keyword to count
-#
-# • Column Name   — label that appears in the output Excel
-# • Section       — heading in the CV where the pipeline should look
-#                   (leave blank to search the entire CV)
-# • Keyword       — any line containing this word is counted
-#
-# Examples (remove the leading # to activate):
-# ─────────────────────────────────────────────────────────────────────────────
-# Invited Talks   | Invited Talks              | invited
-# Book Chapters   | Book Chapters              | chapter
-# Patents         | Patents                    | patent
-# Awards          | Honors and Awards          | award
-# Editorials      | Editorial                  | editor
-# Media Coverage  | Media                      | coverage
+STANDARD RULES  (always applied)
+----------------------------------
+These run automatically and cannot be removed.
+
+1. UG Courses
+   Count the number of distinct undergraduate courses (course number below 500)
+   taught during the report year.
+
+2. Grad Courses
+   Count the number of distinct graduate courses (course number 500 or above)
+   taught during the report year.
+
+3. MS Graduated
+   Count MS/MEN students who graduated during the report year with this faculty
+   member as committee chair.
+
+4. PhD Graduated
+   Count PhD students who graduated during the report year with this faculty
+   member as committee chair.
+
+5. Grants
+   Count funded, in-progress grants where faculty is PI or Co-PI, that started
+   during the report year and are still active through October.
+
+6. CH/CO
+   Count active graduate students for whom this faculty member is the chair or
+   co-chair of the thesis or dissertation committee.
+
+7. CP
+   Count conference papers published during the report year (takes the highest
+   count across the FAR, CV, and supplemental spreadsheet).
+
+8. Journal
+   Count refereed journal papers published during the report year (takes the
+   highest count across the CV and supplemental spreadsheet).
+
+
+CUSTOM RULES  (add your own below)
+------------------------------------
+To add a new column to the output, write a rule using this format:
+
+   Rule name:  [what to call this column in the output Excel]
+   Look in:    [section heading in the CV — leave blank to search the entire document]
+   Count:      [what to count — choose one of the options below]
+
+Count options:
+   all entries              — count every numbered item in the section
+   contains: word           — count items that include this word or phrase
+   year: 2024               — count items that mention a specific year
+   any of: word1, word2     — count items containing at least one of these words
+   all of: word1, word2     — count items that contain every one of these words
+   excludes: word           — count items that do NOT contain this word
+
+
+EXAMPLES  (copy, edit, and add below the line to activate)
+------------------------------------------------------------
+   Rule name:  Invited Talks
+   Look in:    Invited Talks
+   Count:      all entries
+
+   Rule name:  Book Chapters
+   Look in:    Book Chapters
+   Count:      all entries
+
+   Rule name:  Patents
+   Look in:    Patents
+   Count:      all entries
+
+   Rule name:  Awards
+   Look in:    Honors and Awards
+   Count:      contains: award
+
+   Rule name:  2024 Talks
+   Look in:    Invited Talks
+   Count:      year: 2024
+
+
+ADD YOUR RULES HERE
+====================
+(write your rules below this line — follow the format shown above)
+
 """
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
@@ -236,7 +345,8 @@ with tab_upload:
             rr.FILE_STAFF_SHEET = cfg["staff_sheet"]
 
         # ── Load custom rules from the Rules Editor ────────────────────────
-        custom_rules = st.session_state.get("custom_rules", [])
+        rules_text   = st.session_state.get("rules_text", DEFAULT_RULES_TEXT)
+        custom_rules = _parse_custom_rules(rules_text)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             for uf in uploaded_files:
@@ -444,126 +554,50 @@ with tab_config:
 # TAB 3 — Rules Editor
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_rules:
-    st.subheader("📝 Rules Editor")
+    st.subheader("📝 Rules")
+    st.caption(
+        "Read the standard rules below and add your own at the bottom of the text box. "
+        "Click **Save Rules** when done — your custom rules will appear as extra columns in the output."
+    )
 
-    if "custom_rules" not in st.session_state:
-        st.session_state["custom_rules"] = []
+    rules_text = st.text_area(
+        label="Rules text",
+        value=st.session_state.get("rules_text", DEFAULT_RULES_TEXT),
+        height=600,
+    )
 
-    # ── Standard rules (read-only reference) ──────────────────────────────────
-    with st.expander("📋 Standard rules (always applied — click to view)", expanded=False):
-        standard = [
-            ("UG Courses",    "Counts distinct undergrad course numbers taught this year (below the UG ceiling)."),
-            ("Grad Courses",  "Counts distinct graduate course numbers taught this year (at or above the UG ceiling)."),
-            ("MS Graduated",  "Counts MS/MEN students who graduated this year with faculty as chair."),
-            ("PhD Graduated", "Counts PhD students who graduated this year with faculty as chair."),
-            ("Grants",        "Counts funded-in-progress PI/CoPI grants started this year, active through Q4."),
-            ("CH/CO",         "Counts active graduate chair/co-chair advisees (ongoing + current CV members)."),
-            ("CP",            "Counts conference papers published this year (best of FAR, CV, supplemental)."),
-            ("Journal",       "Counts refereed journal papers published this year (best of CV and supplemental)."),
-        ]
-        for name, desc in standard:
-            st.markdown(f"**{name}** — {desc}")
-
-    st.markdown("---")
-
-    # ── Active custom rules ────────────────────────────────────────────────────
-    rules = st.session_state["custom_rules"]
-    if rules:
-        st.markdown("**Active custom rules:**")
-        to_delete = []
-        for idx, cr in enumerate(rules):
-            with st.container():
-                ca, cb, cc = st.columns([2, 6, 1])
-                ca.markdown(f"**{cr['name']}**")
-                rt = cr.get("rule_type","")
-                sec = cr.get("section","") or "entire CV"
-                kw  = cr.get("keywords","")
-                yr  = cr.get("year","")
-                if rt == "Count all entries in section":
-                    cb.caption(f"{rt} · section: *{sec}*")
-                elif rt == "Count entries from a specific year":
-                    cb.caption(f"{rt} · section: *{sec}* · year: **{yr}**")
-                else:
-                    cb.caption(f"{rt} · section: *{sec}* · keywords: `{kw}`")
-                if cc.button("🗑️", key=f"del_{idx}"):
-                    to_delete.append(idx)
-        for idx in reversed(to_delete):
-            rules.pop(idx)
-        st.session_state["custom_rules"] = rules
-        st.markdown("---")
-
-    # ── Add new rule ───────────────────────────────────────────────────────────
-    st.markdown("**Add a custom rule:**")
-
-    col1, col2 = st.columns([1, 2])
-    with col1:
-        new_name = st.text_input("Column name in output",
-                                 placeholder="e.g. Invited Talks",
-                                 key="nr_name")
-        new_section = st.text_input("Look inside CV section (optional)",
-                                    placeholder="e.g. Invited Talks",
-                                    help="Leave blank to search the entire CV.",
-                                    key="nr_section")
-    with col2:
-        new_type = st.selectbox("Rule type", options=list(RULE_TYPES.keys()), key="nr_type")
-        st.caption(RULE_TYPES[new_type])
-
-    # Conditional fields based on rule type
-    new_keywords = ""
-    new_year = ""
-    if new_type == "Count entries from a specific year":
-        new_year = st.text_input("Year to count", placeholder="e.g. 2024", key="nr_year")
-    elif new_type != "Count all entries in section":
-        kw_label = {
-            "Count entries containing keyword":    "Keyword to match (one word or phrase)",
-            "Count entries matching ALL keywords":  "Keywords — ALL must match (comma-separated)",
-            "Count entries matching ANY keyword":   "Keywords — ANY can match (comma-separated)",
-            "Count entries NOT containing keyword": "Keyword to exclude",
-        }.get(new_type, "Keywords")
-        new_keywords = st.text_input(kw_label, placeholder="e.g. invited, talk", key="nr_kw")
-
-    if st.button("➕ Add Rule", type="primary"):
-        if not new_name.strip():
-            st.error("Please enter a column name.")
-        elif new_type == "Count entries from a specific year" and not new_year.strip():
-            st.error("Please enter a year.")
-        elif new_type != "Count all entries in section" and new_type != "Count entries from a specific year" and not new_keywords.strip():
-            st.error("Please enter at least one keyword.")
-        elif any(cr["name"] == new_name.strip() for cr in rules):
-            st.error(f"A rule named '{new_name.strip()}' already exists.")
-        else:
-            st.session_state["custom_rules"].append({
-                "name":      new_name.strip(),
-                "section":   new_section.strip(),
-                "rule_type": new_type,
-                "keywords":  new_keywords.strip(),
-                "year":      new_year.strip(),
-            })
-            st.success(f"✅ Rule '{new_name.strip()}' added.")
+    col_save, col_reset, col_info = st.columns([1, 1, 4])
+    with col_save:
+        if st.button("💾 Save Rules", type="primary"):
+            st.session_state["rules_text"]  = rules_text
+            st.session_state["custom_rules"] = _parse_custom_rules(rules_text)
+            n = len(st.session_state["custom_rules"])
+            st.success(f"✅ Saved — {n} custom rule{'s' if n != 1 else ''} active.")
+    with col_reset:
+        if st.button("↩️ Reset to defaults"):
+            st.session_state["rules_text"]   = DEFAULT_RULES_TEXT
+            st.session_state["custom_rules"] = []
             st.rerun()
 
-    # ── Quick-add examples ─────────────────────────────────────────────────────
-    st.markdown("---")
-    st.markdown("**Quick-add examples:**")
-    examples = [
-        ("Invited Talks",  "Invited Talks",     "Count all entries in section",          "",       ""),
-        ("Book Chapters",  "Book Chapters",      "Count all entries in section",          "",       ""),
-        ("Patents",        "Patents",            "Count all entries in section",          "",       ""),
-        ("Awards",         "Honors and Awards",  "Count entries containing keyword",      "award",  ""),
-        ("Editorials",     "Editorial",          "Count entries containing keyword",      "editor", ""),
-        ("2024 Talks",     "Invited Talks",      "Count entries from a specific year",    "",       "2024"),
-    ]
-    ex_cols = st.columns(len(examples))
-    for col, (name, section, rtype, kw, yr) in zip(ex_cols, examples):
-        with col:
-            st.markdown(f"**{name}**")
-            st.caption(f"_{rtype}_")
-            if st.button("Add", key=f"qadd_{name}"):
-                if not any(cr["name"] == name for cr in st.session_state["custom_rules"]):
-                    st.session_state["custom_rules"].append({
-                        "name": name, "section": section,
-                        "rule_type": rtype, "keywords": kw, "year": yr,
-                    })
-                    st.rerun()
+    # Live preview of parsed custom rules
+    parsed = _parse_custom_rules(rules_text)
+    if parsed:
+        st.markdown("---")
+        st.markdown(f"**{len(parsed)} custom rule(s) detected — will add columns to output:**")
+        for cr in parsed:
+            sec = f"in section *{cr['section']}*" if cr["section"] else "across entire CV"
+            rt  = cr["rule_type"]
+            if rt == "Count all entries in section":
+                detail = f"count all entries {sec}"
+            elif rt == "Count entries from a specific year":
+                detail = f"count entries from year **{cr['year']}** {sec}"
+            elif rt in ("Count entries matching ALL keywords", "Count entries matching ANY keyword"):
+                logic = "ALL of" if "ALL" in rt else "ANY of"
+                detail = f"count entries with {logic} `{cr['keywords']}` {sec}"
+            elif rt == "Count entries NOT containing keyword":
+                detail = f"count entries that do NOT contain `{cr['keywords']}` {sec}"
+            else:
+                detail = f"count entries containing `{cr['keywords']}` {sec}"
+            st.markdown(f"- **{cr['name']}** — {detail}")
 
 
