@@ -657,9 +657,12 @@ if st.session_state.get("excel_bytes"):
 
     st.dataframe(pd.DataFrame(rows).set_index("Last Name"), use_container_width=True)
 
-    st.download_button(
-        label=f"⬇️  Download {_fname}",
-        data=_excel_bytes,
-        file_name=_fname,
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    import base64
+    b64 = base64.b64encode(_excel_bytes).decode()
+    st.markdown(
+        f'<a href="data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64}" '
+        f'download="{_fname}" style="display:inline-block;padding:0.5em 1.2em;'
+        f'background:#FF4B4B;color:white;border-radius:6px;text-decoration:none;font-weight:bold;">'
+        f'⬇️ Download {_fname}</a>',
+        unsafe_allow_html=True
     )
