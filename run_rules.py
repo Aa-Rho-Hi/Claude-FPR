@@ -31,8 +31,11 @@ from openpyxl.utils import get_column_letter
 # ██  DEPARTMENT CONFIGURATION  ███████████████████████████████████████████████
 # ══════════════════════════════════════════════════════════════════════════════
 #
-# Edit the values in this section to adapt the pipeline to your department.
-# Everything below this block is extraction logic — no need to touch it.
+# PREFERRED: place a department_config.py file next to run_rules.py and edit
+# that file. run_rules.py will import settings from it automatically.
+# If no department_config.py is found, the defaults below are used.
+#
+# DO NOT edit below unless you have no department_config.py.
 #
 # ── 1. Report year ────────────────────────────────────────────────────────────
 #   The calendar year covered by this FAR cycle.
@@ -146,6 +149,32 @@ GRANT_COUNTED_ROLES    = {'PI', 'CoPI'}         # add 'Other' if needed
 # ══════════════════════════════════════════════════════════════════════════════
 
 DEBUG = False
+
+# ── Load department_config.py overrides (if present) ──────────────────────────
+try:
+    import department_config as _dc
+    def _ov(name):
+        return getattr(_dc, name, globals().get(name))
+    REPORT_YEAR            = _ov('REPORT_YEAR')
+    Q4_START               = _ov('Q4_START')
+    KNOWN_FACULTY          = _ov('KNOWN_FACULTY')
+    FILE_PATTERN_CV        = _ov('FILE_PATTERN_CV')
+    FILE_PATTERN_XLSX      = _ov('FILE_PATTERN_XLSX')
+    FILE_STAFF_SHEET       = _ov('FILE_STAFF_SHEET')
+    UG_COURSE_CEILING      = _ov('UG_COURSE_CEILING')
+    RESEARCH_SHELL_TOKENS  = _ov('RESEARCH_SHELL_TOKENS')
+    HONORS_TOKENS          = _ov('HONORS_TOKENS')
+    JOURNAL_HDR_KW         = _ov('JOURNAL_HDR_KW')
+    CONF_HDR_KW            = _ov('CONF_HDR_KW')
+    JOURNAL_STATUS         = _ov('JOURNAL_STATUS')
+    GRANT_STATUS_KEYWORD   = _ov('GRANT_STATUS_KEYWORD')
+    GRANT_PROGRESS_KEYWORD = _ov('GRANT_PROGRESS_KEYWORD')
+    GRANT_MIN_END_DATE     = _ov('GRANT_MIN_END_DATE')
+    GRANT_COUNTED_ROLES    = _ov('GRANT_COUNTED_ROLES')
+    CUSTOM_RULES           = getattr(_dc, 'CUSTOM_RULES', {})
+    print("[config] Loaded settings from department_config.py")
+except ModuleNotFoundError:
+    CUSTOM_RULES = {}   # no custom rules if no config file
 
 def dbg(msg):
     if DEBUG:
@@ -1561,6 +1590,14 @@ def extract_faculty(last_name, input_dir='.', api_key=None, all_far_data=None):
         'grants': grts, 'ch_co': chco, 'cp': cp, 'journal': jrnl,
         'postdocs': postdocs, 'gars': gars,
     }
+    # Run any custom rules defined in department_config.py
+    for col_name, rule_fn in CUSTOM_RULES.items():
+        try:
+            result[col_name] = rule_fn(far, cv, xlsx)
+            print(f"    {col_name}={result[col_name]}")
+        except Exception as e:
+            result[col_name] = 0
+            print(f"    {col_name}=ERROR ({e})")
     print(f"\n  Results:")
     print(f"    UG={ug}  Grad={grad}  MS={ms}  PhD={phd}")
     print(f"    Grants={grts}  CH/CO={chco}  CP={cp}  Journal={jrnl}")
@@ -1588,79 +1625,47 @@ def _dat(cell, even=True):
 
 def generate_excel(results, output_path):
     wb = openpyxl.Workbook()
-    if "Sheet" in wb.sheetnames:
-        del wb["Sheet"]
+    ws = wb.active
+    ws.title = "FAR Results"
 
-    # Summary sheet
-    ws3 = wb.create_sheet("Summary", 0)
-    ws3.sheet_properties.tabColor = "FF0000"
-    ws3.merge_cells("A1:J1")
-    c = ws3["A1"]
-    c.value = f"FAR Extraction Results — CY{REPORT_YEAR}"
-    c.font = Font(name="Arial", bold=True, size=14, color="2F5496")
-    c.alignment = Alignment(horizontal="center")
-    ws3.row_dimensions[1].height = 28
+    # Title row
+    std_hdrs = ["Last Name","First Name","Title",
+                "UG","Grad","MS","PhD","Grants","CH/CO","CP","Journal"]
+    # Detect any custom columns present in results
+    custom_keys = [k for k in results[0].keys()
+                   if k not in ('last_name','first_name','title','ug','grad',
+                                'ms','phd','grants','ch_co','cp','journal')]
+    all_hdrs = std_hdrs + custom_keys
+    total_cols = len(all_hdrs)
 
-    sum_hdrs = ["Last Name","First Name","UG","Grad","MS","PhD","Grants","CH/CO","CP","Journal"]
-    ws3.row_dimensions[2].height = 20
-    for c_idx, h in enumerate(sum_hdrs, 1):
-        cell = ws3.cell(row=2, column=c_idx, value=h)
+    ws.merge_cells(f"A1:{get_column_letter(total_cols)}1")
+    title_cell = ws["A1"]
+    title_cell.value = f"FAR Extraction Results — CY{REPORT_YEAR}"
+    title_cell.font = Font(name="Arial", bold=True, size=14, color="2F5496")
+    title_cell.alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 28
+
+    # Header row
+    col_widths = [16, 14, 18, 8, 8, 8, 8, 10, 8, 8, 10]
+    ws.row_dimensions[2].height = 20
+    for c_idx, h in enumerate(all_hdrs, 1):
+        cell = ws.cell(row=2, column=c_idx, value=h)
         _hdr(cell)
-        ws3.column_dimensions[get_column_letter(c_idx)].width = 10
-    ws3.column_dimensions["A"].width = 16
-    ws3.column_dimensions["B"].width = 14
+        w = col_widths[c_idx - 1] if c_idx <= len(col_widths) else 12
+        ws.column_dimensions[get_column_letter(c_idx)].width = w
 
+    # Data rows
+    key_map = ["last_name","first_name","title",
+               "ug","grad","ms","phd","grants","ch_co","cp","journal"] + custom_keys
     for i, r in enumerate(results, 3):
-        vals = [r['last_name'], r['first_name'], r['ug'], r['grad'],
-                r['ms'], r['phd'], r['grants'], r['ch_co'], r['cp'], r['journal']]
         even = i % 2 == 0
-        for c_idx, v in enumerate(vals, 1):
-            cell = ws3.cell(row=i, column=c_idx, value=v)
+        for c_idx, key in enumerate(key_map, 1):
+            cell = ws.cell(row=i, column=c_idx, value=r.get(key, ""))
             _dat(cell, even)
-    ws3.freeze_panes = "A3"
-
-    # Teaching & Advising
-    ws1 = wb.create_sheet("Teaching & Advising")
-    ws1.sheet_properties.tabColor = "4472C4"
-    h1 = ["Faculty Last Name","Faculty First Name","Title",
-          "# UG\nCourses","# Grad\nCourses","# MS/MEN\nGraduated","# PhD\nGraduated"]
-    ws1.row_dimensions[1].height = 40
-    for c, (h, w) in enumerate(zip(h1, [18,16,14,10,10,12,12]), 1):
-        cell = ws1.cell(row=1, column=c, value=h)
-        _hdr(cell)
-        ws1.column_dimensions[get_column_letter(c)].width = w
-    for i, r in enumerate(results, 2):
-        vals = [r['last_name'], r['first_name'], r['title'],
-                r['ug'], r['grad'], r['ms'], r['phd']]
-        even = i % 2 == 0
-        for c, v in enumerate(vals, 1):
-            cell = ws1.cell(row=i, column=c, value=v)
-            _dat(cell, even)
-            if c <= 3:
+            if c_idx <= 3:
                 cell.alignment = Alignment(horizontal="left", vertical="center")
-    ws1.freeze_panes = "A2"
 
-    # Research & Publications
-    ws2 = wb.create_sheet("Research & Publications")
-    ws2.sheet_properties.tabColor = "70AD47"
-    h2 = ["Faculty Last Name","Faculty First Name",
-          "Total\nGrants","CH/CO","CP\nTotals","Refereed\nJournal\nPapers"]
-    ws2.row_dimensions[1].height = 40
-    for c, (h, w) in enumerate(zip(h2, [18,16,10,10,10,12]), 1):
-        cell = ws2.cell(row=1, column=c, value=h)
-        _hdr(cell)
-        ws2.column_dimensions[get_column_letter(c)].width = w
-    for i, r in enumerate(results, 2):
-        vals = [r['last_name'], r['first_name'],
-                r['grants'], r['ch_co'], r['cp'], r['journal']]
-        even = i % 2 == 0
-        for c, v in enumerate(vals, 1):
-            cell = ws2.cell(row=i, column=c, value=v)
-            _dat(cell, even)
-            if c <= 2:
-                cell.alignment = Alignment(horizontal="left", vertical="center")
-    ws2.freeze_panes = "A2"
-
+    ws.freeze_panes = "A3"
     wb.save(output_path)
     print(f"\nSaved: {output_path}")
 
