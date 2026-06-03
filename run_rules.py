@@ -1628,9 +1628,9 @@ def generate_excel(results, output_path):
     if "Sheet" in wb.sheetnames:
         del wb["Sheet"]
 
-    # Detect custom columns
+    # Detect custom columns (exclude all built-in keys)
     std_keys = {'last_name','first_name','title','ug','grad','ms','phd',
-                'grants','ch_co','cp','journal'}
+                'grants','ch_co','cp','journal','postdocs','gars'}
     custom_keys = [k for k in results[0].keys() if k not in std_keys]
 
     def _pdf_name(r):
@@ -1664,7 +1664,7 @@ def generate_excel(results, output_path):
             r['grants'], r['ch_co'], r['cp'], r['journal'],
             r.get('book_chapter', 0), r.get('textbook', 0),
             r.get('edited_book', 0),
-            r.get('number_of_postdocs', 0), r.get('number_of_graduate_assistants', 0),
+            r.get('postdocs', 0), r.get('gars', 0),
         ] + [r.get(k, 0) for k in custom_keys]
         even = i % 2 == 0
         for c, v in enumerate(vals, 1):

@@ -784,11 +784,19 @@ if True:
                 st.error("No results produced. Check file naming and try again.")
                 st.stop()
 
-            out_path = os.path.join(tmpdir, output_filename)
-            rr.generate_excel(results, out_path)
-            with open(out_path, "rb") as fh:
-                excel_bytes = fh.read()
+            # ── Generate Excel ─────────────────────────────────────────────
+            try:
+                out_path = os.path.join(tmpdir, output_filename)
+                rr.generate_excel(results, out_path)
+                with open(out_path, "rb") as fh:
+                    excel_bytes = fh.read()
+            except Exception as e:
+                st.error(f"❌ Failed to generate Excel: {e}")
+                import traceback
+                st.code(traceback.format_exc())
+                st.stop()
 
+            # ── Summary table ──────────────────────────────────────────────
             st.markdown("---")
             st.subheader("📊 Summary")
             import pandas as pd
