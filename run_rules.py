@@ -1625,47 +1625,115 @@ def _dat(cell, even=True):
 
 def generate_excel(results, output_path):
     wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "FAR Results"
+    if "Sheet" in wb.sheetnames:
+        del wb["Sheet"]
 
-    # Title row
-    std_hdrs = ["Last Name","First Name","Title",
-                "UG","Grad","MS","PhD","Grants","CH/CO","CP","Journal"]
-    # Detect any custom columns present in results
-    custom_keys = [k for k in results[0].keys()
-                   if k not in ('last_name','first_name','title','ug','grad',
-                                'ms','phd','grants','ch_co','cp','journal')]
-    all_hdrs = std_hdrs + custom_keys
-    total_cols = len(all_hdrs)
+    # Detect custom columns
+    std_keys = {'last_name','first_name','title','ug','grad','ms','phd',
+                'grants','ch_co','cp','journal'}
+    custom_keys = [k for k in results[0].keys() if k not in std_keys]
 
-    ws.merge_cells(f"A1:{get_column_letter(total_cols)}1")
-    title_cell = ws["A1"]
-    title_cell.value = f"FAR Extraction Results — CY{REPORT_YEAR}"
-    title_cell.font = Font(name="Arial", bold=True, size=14, color="2F5496")
-    title_cell.alignment = Alignment(horizontal="center", vertical="center")
-    ws.row_dimensions[1].height = 28
+    def _pdf_name(r):
+        initial = (r.get('first_name') or 'X')[0]
+        return f"F180Vita_{initial}.{r['last_name']}.pdf"
 
-    # Header row
-    col_widths = [16, 14, 18, 8, 8, 8, 8, 10, 8, 8, 10]
-    ws.row_dimensions[2].height = 20
-    for c_idx, h in enumerate(all_hdrs, 1):
-        cell = ws.cell(row=2, column=c_idx, value=h)
+    # ── Sheet 1: AR Memo Data ─────────────────────────────────────────────────
+    ws1 = wb.create_sheet("AR Memo Data")
+    ar_hdrs = [
+        "pdf_file_name", "faculty_last_name", "faculty_first_name", "titles",
+        "ug_courses_count", "grad_courses_count",
+        "phd_students_graduated", "ms_msen_students_graduated",
+        "total_grants", "ch_co", "cp_totals", "refereed_journal_papers",
+        "book_chapter", "textbook", "edited_book",
+        "number_of_postdocs", "number_of_graduate_assistants",
+    ] + custom_keys
+    ar_widths = [26,18,16,14,14,14,16,18,12,8,10,20,12,10,12,16,22]
+
+    ws1.row_dimensions[1].height = 20
+    for c, h in enumerate(ar_hdrs, 1):
+        cell = ws1.cell(row=1, column=c, value=h)
         _hdr(cell)
-        w = col_widths[c_idx - 1] if c_idx <= len(col_widths) else 12
-        ws.column_dimensions[get_column_letter(c_idx)].width = w
+        w = ar_widths[c-1] if c <= len(ar_widths) else 14
+        ws1.column_dimensions[get_column_letter(c)].width = w
 
-    # Data rows
-    key_map = ["last_name","first_name","title",
-               "ug","grad","ms","phd","grants","ch_co","cp","journal"] + custom_keys
-    for i, r in enumerate(results, 3):
+    for i, r in enumerate(results, 2):
+        vals = [
+            _pdf_name(r),
+            r['last_name'], r['first_name'], r.get('title',''),
+            r['ug'], r['grad'], r['phd'], r['ms'],
+            r['grants'], r['ch_co'], r['cp'], r['journal'],
+            r.get('book_chapter', 0), r.get('textbook', 0),
+            r.get('edited_book', 0),
+            r.get('number_of_postdocs', 0), r.get('number_of_graduate_assistants', 0),
+        ] + [r.get(k, 0) for k in custom_keys]
         even = i % 2 == 0
-        for c_idx, key in enumerate(key_map, 1):
-            cell = ws.cell(row=i, column=c_idx, value=r.get(key, ""))
+        for c, v in enumerate(vals, 1):
+            cell = ws1.cell(row=i, column=c, value=v)
             _dat(cell, even)
-            if c_idx <= 3:
+            if c in (1, 2, 3, 4):
                 cell.alignment = Alignment(horizontal="left", vertical="center")
+    ws1.freeze_panes = "A2"
 
-    ws.freeze_panes = "A3"
+    # ── Sheet 2: Grants ───────────────────────────────────────────────────────
+    ws2 = wb.create_sheet("Grants")
+    g_hdrs = ["Last name","First name","Title",
+              "External grants","Internal grants","Total grants"]
+    g_widths = [16, 14, 18, 14, 14, 12]
+    ws2.row_dimensions[1].height = 20
+    for c, h in enumerate(g_hdrs, 1):
+        cell = ws2.cell(row=1, column=c, value=h)
+        _hdr(cell)
+        ws2.column_dimensions[get_column_letter(c)].width = g_widths[c-1]
+    for i, r in enumerate(results, 2):
+        total = r['grants']
+        vals = [r['last_name'], r['first_name'], r.get('title',''),
+                total, 0, total]
+        even = i % 2 == 0
+        for c, v in enumerate(vals, 1):
+            cell = ws2.cell(row=i, column=c, value=v)
+            _dat(cell, even)
+            if c <= 3:
+                cell.alignment = Alignment(horizontal="left", vertical="center")
+    ws2.freeze_panes = "A2"
+
+    # ── Sheet 3: Service ──────────────────────────────────────────────────────
+    ws3 = wb.create_sheet("Service")
+    s_hdrs = ["pdf_file_name","faculty_last_name","faculty_first_name","admin_duties"]
+    s_widths = [26, 18, 16, 60]
+    ws3.row_dimensions[1].height = 20
+    for c, h in enumerate(s_hdrs, 1):
+        cell = ws3.cell(row=1, column=c, value=h)
+        _hdr(cell)
+        ws3.column_dimensions[get_column_letter(c)].width = s_widths[c-1]
+    for i, r in enumerate(results, 2):
+        vals = [_pdf_name(r), r['last_name'], r['first_name'], ""]
+        even = i % 2 == 0
+        for c, v in enumerate(vals, 1):
+            cell = ws3.cell(row=i, column=c, value=v)
+            _dat(cell, even)
+            cell.alignment = Alignment(horizontal="left", vertical="center",
+                                       wrap_text=(c == 4))
+    ws3.freeze_panes = "A2"
+
+    # ── Sheet 4: Submission ───────────────────────────────────────────────────
+    ws4 = wb.create_sheet("Submission")
+    sub_hdrs = ["Last name","First name","CV","FPR"]
+    sub_widths = [16, 14, 8, 8]
+    ws4.row_dimensions[1].height = 20
+    for c, h in enumerate(sub_hdrs, 1):
+        cell = ws4.cell(row=1, column=c, value=h)
+        _hdr(cell)
+        ws4.column_dimensions[get_column_letter(c)].width = sub_widths[c-1]
+    for i, r in enumerate(results, 2):
+        vals = [r['last_name'], r['first_name'], 1, 1]
+        even = i % 2 == 0
+        for c, v in enumerate(vals, 1):
+            cell = ws4.cell(row=i, column=c, value=v)
+            _dat(cell, even)
+            if c <= 2:
+                cell.alignment = Alignment(horizontal="left", vertical="center")
+    ws4.freeze_panes = "A2"
+
     wb.save(output_path)
     print(f"\nSaved: {output_path}")
 
