@@ -599,13 +599,9 @@ with st.sidebar:
         language=None,
     )
 
-# ── Tabs ───────────────────────────────────────────────────────────────────────
-tab_upload, tab_config, tab_rules = st.tabs(["📂 Upload & Run", "⚙️ Configuration", "📝 Rules Editor"])
+st.title("📄 FAR Extraction Pipeline")
 
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 1 — Upload & Run
-# ══════════════════════════════════════════════════════════════════════════════
-with tab_upload:
+if True:
     st.subheader("1. Upload Files")
     uploaded_files = st.file_uploader(
         "Upload all files (FAR PDFs, CV PDFs, XLSX files) — select all at once",
@@ -816,11 +812,11 @@ with tab_upload:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
 
+st.markdown("---")
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 2 — Configuration
+# SECTION 2 — Configuration
 # ══════════════════════════════════════════════════════════════════════════════
-with tab_config:
-    st.subheader("⚙️ Extraction Configuration")
+with st.expander("⚙️ Configuration", expanded=False):
     st.caption("Changes here apply to the next run. No coding needed.")
 
     cfg = st.session_state.get("cfg", {})
@@ -906,11 +902,11 @@ with tab_config:
         }
         st.success("✅ Configuration saved — will apply on next run.")
 
+st.markdown("---")
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 3 — Rules Editor
+# SECTION 3 — Rules Editor
 # ══════════════════════════════════════════════════════════════════════════════
-with tab_rules:
-    st.subheader("📝 Rules")
+with st.expander("📝 Rules Editor", expanded=False):
     st.caption(
         "Read the standard rules below and add your own at the bottom of the text box. "
         "Click **Save Rules** when done — your custom rules will appear as extra columns in the output."
