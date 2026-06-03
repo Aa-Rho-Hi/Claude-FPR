@@ -560,17 +560,65 @@ if run_btn and uploaded_files:
         if not results:
             st.error("❌ No results produced. Check file naming.")
         else:
-            # Generate Excel
+            # Build Excel in memory using pandas + openpyxl
             try:
-                out_path = os.path.join(tmpdir, output_filename)
-                rr.generate_excel(results, out_path)
-                with open(out_path, "rb") as fh:
-                    excel_bytes = fh.read()
+                import pandas as pd
+                import io as _io
+
+                # AR Memo Data sheet
+                ar_rows = []
+                for r in results:
+                    first_initial = (r.get("first_name") or "X")[0]
+                    row = {
+                        "pdf_file_name":                 f"F180Vita_{first_initial}.{r['last_name']}.pdf",
+                        "faculty_last_name":              r["last_name"],
+                        "faculty_first_name":             r["first_name"],
+                        "titles":                         r.get("title", ""),
+                        "ug_courses_count":               r["ug"],
+                        "grad_courses_count":             r["grad"],
+                        "phd_students_graduated":         r["phd"],
+                        "ms_msen_students_graduated":     r["ms"],
+                        "total_grants":                   r["grants"],
+                        "ch_co":                          r["ch_co"],
+                        "cp_totals":                      r["cp"],
+                        "refereed_journal_papers":        r["journal"],
+                        "book_chapter":                   r.get("book_chapter", 0),
+                        "textbook":                       r.get("textbook", 0),
+                        "edited_book":                    r.get("edited_book", 0),
+                        "number_of_postdocs":             r.get("postdocs", 0),
+                        "number_of_graduate_assistants":  r.get("gars", 0),
+                    }
+                    for cr in custom_rules:
+                        row[cr["name"]] = r.get(cr["name"], 0)
+                    ar_rows.append(row)
+
+                grants_rows = [{"Last name": r["last_name"], "First name": r["first_name"],
+                                "Title": r.get("title",""), "External grants": r["grants"],
+                                "Internal grants": 0, "Total grants": r["grants"]}
+                               for r in results]
+
+                service_rows = [{"pdf_file_name": f"F180Vita_{(r.get('first_name') or 'X')[0]}.{r['last_name']}.pdf",
+                                 "faculty_last_name": r["last_name"],
+                                 "faculty_first_name": r["first_name"],
+                                 "admin_duties": ""}
+                                for r in results]
+
+                submission_rows = [{"Last name": r["last_name"], "First name": r["first_name"],
+                                    "CV": 1, "FPR": 1} for r in results]
+
+                buf = _io.BytesIO()
+                with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                    pd.DataFrame(ar_rows).to_excel(writer, sheet_name="AR Memo Data",   index=False)
+                    pd.DataFrame(grants_rows).to_excel(writer, sheet_name="Grants",     index=False)
+                    pd.DataFrame(service_rows).to_excel(writer, sheet_name="Service",   index=False)
+                    pd.DataFrame(submission_rows).to_excel(writer, sheet_name="Submission", index=False)
+
+                excel_bytes = buf.getvalue()
                 st.session_state["results"]        = results
                 st.session_state["excel_bytes"]    = excel_bytes
                 st.session_state["excel_filename"] = output_filename
                 st.session_state["custom_rules"]   = custom_rules
-                st.success(f"✅ Excel generated — {len(excel_bytes):,} bytes.")
+                st.success(f"✅ Excel ready — {len(excel_bytes):,} bytes across 4 sheets.")
             except Exception as e:
                 import traceback
                 st.error(f"❌ Excel generation failed: {e}")
