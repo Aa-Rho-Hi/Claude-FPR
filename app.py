@@ -437,36 +437,48 @@ st.subheader("3. Run Extraction")
 run_btn = st.button("▶ Run Extraction", type="primary", disabled=not uploaded_files)
 
 if run_btn and uploaded_files:
-    # Apply config overrides
-    cfg = st.session_state.get("cfg", {})
-    report_year = cfg.get("report_year", rr.REPORT_YEAR)
-    rr.REPORT_YEAR            = report_year
-    rr.Q4_START               = date(report_year, cfg.get("q4_month", 10), 1)
-    rr.UG_COURSE_CEILING      = cfg.get("ug_ceiling", rr.UG_COURSE_CEILING)
-    rr.GRANT_COUNTED_ROLES    = set(cfg.get("grant_roles", list(rr.GRANT_COUNTED_ROLES)))
-    rr.GRANT_STATUS_KEYWORD   = cfg.get("grant_status_kw", rr.GRANT_STATUS_KEYWORD)
-    rr.GRANT_PROGRESS_KEYWORD = cfg.get("grant_progress_kw", rr.GRANT_PROGRESS_KEYWORD)
-    rr.GRANT_MIN_END_DATE     = date(report_year, cfg.get("grant_min_month", 10), 1)
-    if cfg.get("shell_tokens"):
-        rr.RESEARCH_SHELL_TOKENS = set(t.strip().upper() for t in cfg["shell_tokens"].split(",") if t.strip())
-    if cfg.get("journal_hdrs"):
-        rr.JOURNAL_HDR_KW = set(t.strip().lower() for t in cfg["journal_hdrs"].split(",") if t.strip())
-    if cfg.get("conf_hdrs"):
-        rr.CONF_HDR_KW = set(t.strip().lower() for t in cfg["conf_hdrs"].split(",") if t.strip())
+    st.info(f"▶ Starting extraction — {len(uploaded_files)} file(s) received.")
 
-    custom_rules = _parse_custom_rules(st.session_state.get("rules_text", DEFAULT_RULES_TEXT))
+    try:
+        # Apply config overrides
+        cfg = st.session_state.get("cfg", {})
+        report_year = cfg.get("report_year", rr.REPORT_YEAR)
+        rr.REPORT_YEAR            = report_year
+        rr.Q4_START               = date(report_year, cfg.get("q4_month", 10), 1)
+        rr.UG_COURSE_CEILING      = cfg.get("ug_ceiling", rr.UG_COURSE_CEILING)
+        rr.GRANT_COUNTED_ROLES    = set(cfg.get("grant_roles", list(rr.GRANT_COUNTED_ROLES)))
+        rr.GRANT_STATUS_KEYWORD   = cfg.get("grant_status_kw", rr.GRANT_STATUS_KEYWORD)
+        rr.GRANT_PROGRESS_KEYWORD = cfg.get("grant_progress_kw", rr.GRANT_PROGRESS_KEYWORD)
+        rr.GRANT_MIN_END_DATE     = date(report_year, cfg.get("grant_min_month", 10), 1)
+        if cfg.get("shell_tokens"):
+            rr.RESEARCH_SHELL_TOKENS = set(t.strip().upper() for t in cfg["shell_tokens"].split(",") if t.strip())
+        if cfg.get("journal_hdrs"):
+            rr.JOURNAL_HDR_KW = set(t.strip().lower() for t in cfg["journal_hdrs"].split(",") if t.strip())
+        if cfg.get("conf_hdrs"):
+            rr.CONF_HDR_KW = set(t.strip().lower() for t in cfg["conf_hdrs"].split(",") if t.strip())
 
-    with tempfile.TemporaryDirectory() as tmpdir:
+        custom_rules = _parse_custom_rules(st.session_state.get("rules_text", DEFAULT_RULES_TEXT))
+
+        tmpdir = tempfile.mkdtemp()
+        st.write(f"📁 Temp directory created: `{tmpdir}`")
+
         # Write uploaded files
+        saved = []
         for uf in uploaded_files:
-            with open(os.path.join(tmpdir, uf.name), "wb") as fh:
+            dest = os.path.join(tmpdir, uf.name)
+            with open(dest, "wb") as fh:
                 fh.write(uf.getbuffer())
+            saved.append(uf.name)
+        st.write(f"💾 Saved {len(saved)} files: {', '.join(saved)}")
 
         # Detect faculty
+        far_files = glob.glob(os.path.join(tmpdir, "F180Vita_*.pdf"))
+        st.write(f"🔍 Found {len(far_files)} FAR PDF(s): {[os.path.basename(f) for f in far_files]}")
+
         _known = getattr(rr, "KNOWN_FACULTY", ["Narayanan","Qian","Palermo","Hu","Duffield"])
         if run_mode == "All detected faculty":
             faculty_list = list(_known)
-            for fp in glob.glob(os.path.join(tmpdir, "F180Vita_*.pdf")):
+            for fp in far_files:
                 m = re.match(r'F180Vita_\w+\.(\w+)\.pdf', os.path.basename(fp))
                 if m and m.group(1) not in faculty_list:
                     faculty_list.append(m.group(1))
@@ -475,34 +487,32 @@ if run_btn and uploaded_files:
         else:
             faculty_list = [n.strip() for n in specific_names.split(",") if n.strip()]
 
-        if not faculty_list:
-            st.warning("⚠️ No faculty detected. Check FAR PDFs follow `F180Vita_F.Lastname.pdf`.")
-            st.stop()
+        st.write(f"👥 Faculty to process: {faculty_list}")
 
-        st.info(f"Found {len(faculty_list)} faculty: {', '.join(faculty_list)}")
+        if not faculty_list:
+            st.error("❌ No faculty detected. FAR PDFs must be named `F180Vita_F.Lastname.pdf`.")
+            st.stop()
 
         # Pre-parse FAR PDFs
         all_far_data = {}
-        with st.spinner("Pre-parsing FAR PDFs…"):
-            for far_path in glob.glob(os.path.join(tmpdir, "F180Vita_*.pdf")):
-                m = re.match(r'F180Vita_\w+\.(\w+)\.pdf', os.path.basename(far_path))
-                if not m: continue
-                ln = m.group(1)
-                try:
-                    all_far_data[ln] = (rr.parse_far(far_path), rr.pdf_full_text(far_path))
-                except Exception as e:
-                    st.warning(f"Could not pre-parse {os.path.basename(far_path)}: {e}")
+        st.write("⏳ Pre-parsing FAR PDFs…")
+        for far_path in glob.glob(os.path.join(tmpdir, "F180Vita_*.pdf")):
+            m = re.match(r'F180Vita_\w+\.(\w+)\.pdf', os.path.basename(far_path))
+            if not m: continue
+            ln = m.group(1)
+            try:
+                all_far_data[ln] = (rr.parse_far(far_path), rr.pdf_full_text(far_path))
+                st.write(f"  ✅ Parsed {os.path.basename(far_path)}")
+            except Exception as e:
+                st.warning(f"  ⚠️ Could not parse {os.path.basename(far_path)}: {e}")
 
         # Extract each faculty
         progress  = st.progress(0, text="Starting…")
-        log_area  = st.empty()
         results   = []
-        log_lines = []
 
         for i, last_name in enumerate(faculty_list):
             progress.progress(i / len(faculty_list), text=f"Processing {last_name}…")
-            log_lines.append(f"⏳ **{last_name}**…")
-            log_area.markdown("\n\n".join(log_lines))
+            st.write(f"⏳ Processing **{last_name}**…")
 
             old_stdout, sys.stdout = sys.stdout, io.StringIO()
             try:
@@ -510,12 +520,12 @@ if run_btn and uploaded_files:
                                        api_key=None, all_far_data=all_far_data)
             except Exception as e:
                 r = None
-                log_lines[-1] = f"❌ **{last_name}** — {e}"
+                st.error(f"❌ {last_name} failed: {e}")
+                import traceback; st.code(traceback.format_exc())
             finally:
                 sys.stdout = old_stdout
 
             if r is None:
-                log_area.markdown("\n\n".join(log_lines))
                 continue
 
             # Custom rules
@@ -540,36 +550,41 @@ if run_btn and uploaded_files:
                         r[cr["name"]] = _run_custom_rule(cv_text_full, cr)
 
             results.append(r)
-            base   = (f"✅ **{last_name}** — "
-                      f"UG={r['ug']} Grad={r['grad']} MS={r['ms']} PhD={r['phd']} | "
-                      f"Grants={r['grants']} CH/CO={r['ch_co']} CP={r['cp']} Journal={r['journal']}")
-            extras = "  ".join(f"{cr['name']}={r.get(cr['name'],0)}" for cr in custom_rules)
-            log_lines[-1] = base + (f"  |  {extras}" if extras else "")
-            log_area.markdown("\n\n".join(log_lines))
+            st.write(f"✅ **{last_name}** — UG={r['ug']} Grad={r['grad']} "
+                     f"MS={r['ms']} PhD={r['phd']} | "
+                     f"Grants={r['grants']} CH/CO={r['ch_co']} "
+                     f"CP={r['cp']} Journal={r['journal']}")
 
         progress.progress(1.0, text="Done!")
 
         if not results:
-            st.error("No results produced. Check file naming and try again.")
-            st.stop()
+            st.error("❌ No results produced. Check file naming.")
+        else:
+            # Generate Excel
+            try:
+                out_path = os.path.join(tmpdir, output_filename)
+                rr.generate_excel(results, out_path)
+                with open(out_path, "rb") as fh:
+                    excel_bytes = fh.read()
+                st.session_state["results"]        = results
+                st.session_state["excel_bytes"]    = excel_bytes
+                st.session_state["excel_filename"] = output_filename
+                st.session_state["custom_rules"]   = custom_rules
+                st.success(f"✅ Excel generated — {len(excel_bytes):,} bytes.")
+            except Exception as e:
+                import traceback
+                st.error(f"❌ Excel generation failed: {e}")
+                st.code(traceback.format_exc())
 
-        # Generate Excel
-        try:
-            out_path = os.path.join(tmpdir, output_filename)
-            rr.generate_excel(results, out_path)
-            with open(out_path, "rb") as fh:
-                excel_bytes = fh.read()
-        except Exception as e:
-            import traceback
-            st.error(f"❌ Excel generation failed: {e}")
-            st.code(traceback.format_exc())
-            st.stop()
+        # Cleanup tmpdir
+        import shutil
+        try: shutil.rmtree(tmpdir)
+        except Exception: pass
 
-        # Store in session state so download button survives reruns
-        st.session_state["results"]        = results
-        st.session_state["excel_bytes"]    = excel_bytes
-        st.session_state["excel_filename"] = output_filename
-        st.session_state["custom_rules"]   = custom_rules
+    except Exception as e:
+        import traceback
+        st.error(f"❌ Unexpected error: {e}")
+        st.code(traceback.format_exc())
 
 # ── 6. Results (shown from session state — survives reruns) ───────────────────
 if st.session_state.get("excel_bytes"):
