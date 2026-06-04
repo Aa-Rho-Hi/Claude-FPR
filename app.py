@@ -102,7 +102,8 @@ def _parse_custom_rules(text):
             rule_type, keywords, year = "Count entries containing keyword", count, ""
 
         rules.append({"name": name, "section": section,
-                      "rule_type": rule_type, "keywords": keywords, "year": year})
+                      "rule_type": rule_type, "keywords": keywords, "year": year,
+                      "count_raw": count})   # preserve original text for AI
     return rules
 
 
@@ -213,40 +214,46 @@ def extract_with_ai(rules_text, last_name, cv_text,
         year      = cr.get("year", "")
         name      = cr["name"]
 
-        # Extract just the relevant section text to keep prompt short
+        # Extract the relevant section — send the full section, not truncated
         sec_text = cv_text
         if section:
-            lines    = cv_text.split("\n")
-            in_sec   = False
+            lines     = cv_text.split("\n")
+            in_sec    = False
             sec_lines = []
             for line in lines:
-                if section.lower() in line.lower():
+                if section.lower() in line.lower() and len(line.strip()) < 60:
                     in_sec = True; continue
-                if in_sec and re.match(r'^[A-Z][A-Z\s]{5,}$', line.strip()) and section.lower() not in line.lower():
+                if in_sec and re.match(r'^[A-Z][A-Z\s]{4,}$', line.strip()) \
+                        and section.lower() not in line.lower():
                     in_sec = False
                 if in_sec:
                     sec_lines.append(line)
             if sec_lines:
-                sec_text = "\n".join(sec_lines[:60])
+                sec_text = "\n".join(sec_lines)
 
-        # Build a simple, direct prompt
-        if "all entries" in rule_type.lower():
-            instruction = "Count the total number of entries (numbered items or bullet points)."
+        # Build the instruction from the rule
+        if cr.get("count_raw"):               # user typed plain English in Count field
+            instruction = cr["count_raw"]
+        elif "all entries" in rule_type.lower():
+            instruction = ("Count every distinct entry. Entries may be numbered (1. 2. 3.), "
+                           "use bracket labels ([P1] [P2]…), bullets, or dashes. "
+                           "Each new entry that starts a new item counts as one.")
         elif "year" in rule_type.lower() and year:
             instruction = f"Count entries that mention the year {year}."
         elif "NOT" in rule_type:
-            instruction = f"Count entries that do NOT contain the word '{keywords}'."
+            instruction = f"Count entries that do NOT contain '{keywords}'."
         elif "ANY" in rule_type:
-            instruction = f"Count entries that contain ANY of these words: {keywords}."
+            instruction = f"Count entries containing ANY of: {keywords}."
         elif "ALL" in rule_type:
-            instruction = f"Count entries that contain ALL of these words: {keywords}."
+            instruction = f"Count entries containing ALL of: {keywords}."
         else:
-            instruction = f"Count entries that contain '{keywords}'."
+            instruction = f"Count entries containing '{keywords}'."
 
-        prompt = (f"You are counting items in a faculty CV section.\n\n"
-                  f"Section text:\n{sec_text[:2000]}\n\n"
-                  f"Task: {instruction}\n\n"
-                  f"Reply with a single integer only. No explanation.")
+        prompt = (f"You are a precise data-extraction assistant counting items in a faculty CV.\n\n"
+                  f"=== SECTION: {section or 'Full document'} ===\n"
+                  f"{sec_text[:6000]}\n\n"
+                  f"=== TASK ===\n{instruction}\n\n"
+                  f"Reply with a SINGLE INTEGER only. No explanation, no prose.")
 
         try:
             reply = _call_ai(prompt, api_key, base_url, model)
