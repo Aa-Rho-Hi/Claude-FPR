@@ -631,9 +631,6 @@ if run_btn and uploaded_files:
                     pd.DataFrame(submission_rows).to_excel(writer, sheet_name="Submission", index=False)
 
                 excel_bytes = buf.getvalue()
-                # Verify it's a valid xlsx (ZIP file starts with PK)
-                is_valid = excel_bytes[:2] == b'PK'
-                st.write(f"📊 Excel bytes: {len(excel_bytes):,} | Valid ZIP/xlsx: {is_valid} | First 4 bytes: {excel_bytes[:4]}")
                 st.session_state["results"]        = results
                 st.session_state["excel_bytes"]    = excel_bytes
                 st.session_state["excel_filename"] = output_filename
@@ -677,29 +674,10 @@ if st.session_state.get("excel_bytes"):
 
     st.dataframe(pd.DataFrame(rows).set_index("Last Name"), use_container_width=True)
 
-    st.write(f"📥 Session bytes: {len(_excel_bytes):,} | Valid: {_excel_bytes[:2] == b'PK'}")
-
-    import base64
-    import streamlit.components.v1 as _components
-    b64 = base64.b64encode(_excel_bytes).decode()
-    _components.html(f"""
-    <script>
-    (function() {{
-        const b64 = "{b64}";
-        const byteChars = atob(b64);
-        const byteArr = new Uint8Array(byteChars.length);
-        for (let i = 0; i < byteChars.length; i++) byteArr[i] = byteChars.charCodeAt(i);
-        const blob = new Blob([byteArr], {{
-            type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        }});
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = "{_fname}";
-        a.style = "display:inline-block;padding:10px 24px;background:#FF4B4B;color:white;border-radius:6px;text-decoration:none;font-weight:bold;font-family:sans-serif;font-size:15px;";
-        a.textContent = "⬇️ Download {_fname}";
-        document.body.style.margin = "8px";
-        document.body.appendChild(a);
-    }})();
-    </script>
-    """, height=55)
+    st.download_button(
+        label=f"⬇️ Download {_fname}",
+        data=_excel_bytes,
+        file_name=_fname,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="download_excel",
+    )
