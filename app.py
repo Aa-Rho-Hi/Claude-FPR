@@ -25,25 +25,61 @@ def _run_custom_rule(cv_text, cr):
     keywords  = [k.strip().lower() for k in cr.get("keywords", "").split(",") if k.strip()]
     year_str  = str(cr.get("year", "")).strip()
 
-    lines   = cv_text.split("\n")
-    in_sec  = not section
+    # Extract section — robust for any CV format
+    lines     = cv_text.split("\n")
+    in_sec    = not section
     sec_lines = []
+
+    def _is_section_header(line, keyword):
+        """True if this line looks like a section header containing the keyword."""
+        s = line.strip()
+        if not keyword: return False
+        if keyword not in s.lower(): return False
+        # Accept: short lines, ALL CAPS lines, lines with no punctuation mid-sentence
+        return len(s) < 80 or s.isupper() or re.match(r'^[A-Z][A-Za-z\s\-/&]+$', s)
+
+    def _is_new_major_section(line, current_keyword):
+        """True if this line starts a NEW section (not the current one)."""
+        s = line.strip()
+        if not s or current_keyword in s.lower(): return False
+        # All-caps header, or title-case short line with no numbers
+        return (s.isupper() and len(s) > 3) or \
+               (re.match(r'^[A-Z][A-Za-z\s\-/&]{4,}$', s) and len(s) < 60) or \
+               bool(re.match(r'^[A-Z][A-Z\s]{4,}$', s))
+
     for line in lines:
-        stripped = line.strip()
-        ll = stripped.lower()
-        if section and section in ll:
+        if section and _is_section_header(line, section):
             in_sec = True; continue
-        if in_sec and section and re.match(r'^[A-Z][A-Z\s]{5,}$', stripped) and stripped.lower() != section:
+        if in_sec and section and _is_new_major_section(line, section):
             in_sec = False
         if in_sec:
-            sec_lines.append(stripped)
+            sec_lines.append(line.strip())
 
-    sec_text  = "\n".join(sec_lines)
-    entry_pat = re.compile(r'(?m)^\d+[\.\)]\s')
-    splits    = [m.start() for m in entry_pat.finditer(sec_text)]
-    entries   = ([sec_text[splits[i]: splits[i+1] if i+1 < len(splits) else len(sec_text)]
-                  for i in range(len(splits))]
-                 if splits else [l for l in sec_lines if l])
+    # If section not found, search entire document
+    if not sec_lines and section:
+        sec_lines = [l.strip() for l in lines if l.strip()]
+
+    sec_text = "\n".join(sec_lines)
+
+    # Detect entry format — try multiple patterns in priority order
+    entry_patterns = [
+        re.compile(r'(?m)^\[\w{1,3}\d+\]'),      # [P1] [C1] [J1] bracket labels
+        re.compile(r'(?m)^\d+[\.\)]\s'),           # 1. or 1)
+        re.compile(r'(?m)^[•\-\*]\s'),             # bullets
+    ]
+
+    splits = []
+    for pat in entry_patterns:
+        matches = list(pat.finditer(sec_text))
+        if len(matches) >= 2:
+            splits = [m.start() for m in matches]
+            break
+
+    if splits:
+        entries = [sec_text[splits[i]: splits[i+1] if i+1 < len(splits) else len(sec_text)]
+                   for i in range(len(splits))]
+    else:
+        entries = [l for l in sec_lines if l]
 
     count = 0
     for entry in entries:
@@ -251,7 +287,7 @@ def extract_with_ai(rules_text, last_name, cv_text,
 
         prompt = (f"You are a precise data-extraction assistant counting items in a faculty CV.\n\n"
                   f"=== SECTION: {section or 'Full document'} ===\n"
-                  f"{sec_text[:6000]}\n\n"
+                  f"{sec_text}\n\n"
                   f"=== TASK ===\n{instruction}\n\n"
                   f"Reply with a SINGLE INTEGER only. No explanation, no prose.")
 
@@ -554,23 +590,30 @@ if run_btn and uploaded_files:
             # Custom rules
             if custom_rules:
                 cv_text_full = all_far_data.get(last_name, (None, ""))[1]
-                if ai_api_key:
-                    cv_path = os.path.join(tmpdir, f"{last_name} CV.pdf")
-                    cv_text_ai = cv_text_full
-                    if os.path.exists(cv_path):
-                        try: cv_text_ai = rr.pdf_full_text(cv_path)
-                        except Exception: pass
-                    ai_res = extract_with_ai(
-                        st.session_state.get("rules_text", DEFAULT_RULES_TEXT),
-                        last_name, cv_text_ai,
-                        custom_rules, ai_api_key,
-                        ai_base_url or None, ai_model or "protected.gpt-5")
-                    for cr in custom_rules:
+                # Standard rule types always use regex (reliable, no truncation, no API needed)
+                # AI is only used when user writes a plain-English count instruction
+                std_types = {"Count all entries in section",
+                             "Count entries containing keyword",
+                             "Count entries from a specific year",
+                             "Count entries matching ALL keywords",
+                             "Count entries matching ANY keyword",
+                             "Count entries NOT containing keyword"}
+                for cr in custom_rules:
+                    needs_ai = ai_api_key and cr.get("rule_type") not in std_types
+                    if needs_ai:
+                        cv_path = os.path.join(tmpdir, f"{last_name} CV.pdf")
+                        cv_text_ai = cv_text_full
+                        if os.path.exists(cv_path):
+                            try: cv_text_ai = rr.pdf_full_text(cv_path)
+                            except Exception: pass
+                        ai_res = extract_with_ai(
+                            st.session_state.get("rules_text", DEFAULT_RULES_TEXT),
+                            last_name, cv_text_ai,
+                            [cr], ai_api_key,
+                            ai_base_url or None, ai_model or "gpt-4o")
                         ai_val = (ai_res or {}).get(cr["name"])
-                        r[cr["name"]] = (ai_val if ai_val is not None
-                                         else _run_custom_rule(cv_text_full, cr))
-                else:
-                    for cr in custom_rules:
+                        r[cr["name"]] = ai_val if ai_val is not None else _run_custom_rule(cv_text_full, cr)
+                    else:
                         r[cr["name"]] = _run_custom_rule(cv_text_full, cr)
 
             results.append(r)
