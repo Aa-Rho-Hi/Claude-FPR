@@ -136,33 +136,47 @@ Include any CUSTOM keys defined in the rules.
 """
 
 def _call_ai(prompt, api_key, base_url, model):
-    """Make a single AI call and return the text response."""
+    """
+    Make a single AI call and return the text response.
+    Handles both standard models (gpt-4o) and reasoning models (protected.gpt-5).
+    """
     import requests as _req
     endpoint = (base_url.rstrip("/") + "/chat/completions"
                 if base_url and base_url.strip()
                 else "https://api.openai.com/v1/chat/completions")
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
+    # Detect reasoning model (o-series / protected.gpt-5)
+    is_reasoning = any(x in model.lower() for x in ["o1", "o3", "o4", "gpt-5", "protected"])
+
     payload = {"model": model,
                "messages": [{"role": "user", "content": prompt}],
-               "max_completion_tokens": 8000,
                "stream": False}
-    resp = _req.post(endpoint, json=payload, headers=headers, timeout=120, stream=True)
+    if is_reasoning:
+        payload["max_completion_tokens"] = 8000
+    else:
+        payload["max_tokens"] = 500
+        payload["temperature"] = 0
+
+    resp = _req.post(endpoint, json=payload, headers=headers, timeout=120)
     if not resp.ok:
         return None
+
+    # Try standard JSON response first (gpt-4o, most models)
+    try:
+        data    = resp.json()
+        content = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
+        if content:
+            return content.strip()
+    except Exception:
+        pass
+
+    # Fall back to SSE parsing (some TAMU endpoints stream regardless)
     parts = []
-    for raw in resp.iter_lines():
-        if isinstance(raw, bytes):
-            raw = raw.decode("utf-8", errors="replace")
+    for raw in resp.text.splitlines():
         raw = raw.strip()
         if not raw: continue
-        if raw.startswith("{"):
-            try:
-                obj = json.loads(raw)
-                c   = (obj.get("choices") or [{}])[0]
-                msg = c.get("message") or c.get("delta") or {}
-                parts.append(msg.get("content") or "")
-            except Exception: pass
-        elif raw.startswith("data:"):
+        if raw.startswith("data:"):
             ps = raw[5:].strip()
             if ps == "[DONE]": continue
             try:
@@ -171,6 +185,14 @@ def _call_ai(prompt, api_key, base_url, model):
                 msg = c.get("delta") or c.get("message") or {}
                 parts.append(msg.get("content") or "")
             except Exception: pass
+        elif raw.startswith("{"):
+            try:
+                obj = json.loads(raw)
+                c   = (obj.get("choices") or [{}])[0]
+                msg = c.get("message") or c.get("delta") or {}
+                parts.append(msg.get("content") or "")
+            except Exception: pass
+
     return "".join(parts).strip() or None
 
 
