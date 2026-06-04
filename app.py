@@ -135,115 +135,109 @@ Rules: count conservatively, integers only, 0 when absent, null for missing text
 Include any CUSTOM keys defined in the rules.
 """
 
-def extract_with_ai(rules_text, last_name, far_text, cv_text,
-                    xlsx_summary, custom_rules, api_key,
-                    base_url=None, model="gpt-4o"):
+def _call_ai(prompt, api_key, base_url, model):
+    """Make a single AI call and return the text response."""
     import requests as _req
-
-    custom_block = ""
-    if custom_rules:
-        lines = ["\nCUSTOM FIELDS (include as integer keys in JSON):"]
-        for cr in custom_rules:
-            sec  = f"in '{cr['section']}'" if cr["section"] else "whole doc"
-            lines.append(f"  key: \"{cr['name']}\" — {cr['rule_type']} {sec}"
-                         + (f", kw: {cr['keywords']}" if cr.get("keywords") else "")
-                         + (f", yr: {cr['year']}" if cr.get("year") else ""))
-        custom_block = "\n".join(lines)
-
-    user_msg = (f"RULES:\n{rules_text[:3000]}{custom_block}\n\n"
-                f"FACULTY: {last_name}\n\nFAR TEXT:\n{far_text[:5000]}\n\n"
-                f"CV TEXT:\n{cv_text[:3000]}\n\nSUPPLEMENTAL:\n"
-                f"{xlsx_summary[:1500] if xlsx_summary else '(none)'}\n\n"
-                f"Return ONLY the JSON object.")
-
     endpoint = (base_url.rstrip("/") + "/chat/completions"
                 if base_url and base_url.strip()
                 else "https://api.openai.com/v1/chat/completions")
-
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     payload = {"model": model,
-               "messages": [{"role": "system", "content": _AI_SYSTEM_PROMPT},
-                             {"role": "user",   "content": user_msg}],
-               "max_completion_tokens": 16000, "stream": False}
-
-    def _parse_sse(text):
-        parts = []
-        for line in text.splitlines():
-            line = line.strip()
-            if not line.startswith("data:"): continue
-            ps = line[5:].strip()
-            if ps == "[DONE]": continue
+               "messages": [{"role": "user", "content": prompt}],
+               "max_completion_tokens": 8000,
+               "stream": False}
+    resp = _req.post(endpoint, json=payload, headers=headers, timeout=120, stream=True)
+    if not resp.ok:
+        return None
+    parts = []
+    for raw in resp.iter_lines():
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="replace")
+        raw = raw.strip()
+        if not raw: continue
+        if raw.startswith("{"):
             try:
-                ch = json.loads(ps)
-                c  = (ch.get("choices") or [{}])[0]
-                parts.append(c.get("delta", c.get("message", {})).get("content") or "")
+                obj = json.loads(raw)
+                c   = (obj.get("choices") or [{}])[0]
+                msg = c.get("message") or c.get("delta") or {}
+                parts.append(msg.get("content") or "")
             except Exception: pass
-        return "".join(parts)
-
-    try:
-        resp = _req.post(endpoint, json=payload, headers=headers,
-                         timeout=120, stream=True)
-        if not resp.ok:
-            st.warning(f"⚠️ {last_name}: API {resp.status_code}. Falling back.")
-            return None
-
-        content = ""
-        parts   = []
-        for raw_line in resp.iter_lines():
-            if isinstance(raw_line, bytes):
-                raw_line = raw_line.decode("utf-8", errors="replace")
-            raw_line = raw_line.strip()
-            if not raw_line: continue
-            if raw_line.startswith("{"):
-                try:
-                    obj = json.loads(raw_line)
-                    c   = (obj.get("choices") or [{}])[0]
-                    msg = c.get("message") or c.get("delta") or {}
-                    parts.append(msg.get("content") or "")
-                except Exception: pass
-                continue
-            if not raw_line.startswith("data:"): continue
-            ps = raw_line[5:].strip()
+        elif raw.startswith("data:"):
+            ps = raw[5:].strip()
             if ps == "[DONE]": continue
             try:
-                ch = json.loads(ps)
-                c  = (ch.get("choices") or [{}])[0]
+                ch  = json.loads(ps)
+                c   = (ch.get("choices") or [{}])[0]
                 msg = c.get("delta") or c.get("message") or {}
                 parts.append(msg.get("content") or "")
             except Exception: pass
+    return "".join(parts).strip() or None
 
-        content = "".join(parts).strip()
-        if not content:
-            st.warning(f"⚠️ {last_name}: AI returned empty content. Falling back.")
-            return None
 
-        content = re.sub(r'^```(?:json)?\s*', '', content, flags=re.I)
-        content = re.sub(r'\s*```$', '', content)
-        data    = json.loads(content)
+def extract_with_ai(rules_text, last_name, cv_text,
+                    custom_rules, api_key, base_url=None, model="gpt-4o"):
+    """
+    Run each custom rule independently with a minimal focused prompt.
+    Returns dict of {rule_name: count} or None on total failure.
+    """
+    if not custom_rules:
+        return {}
 
-        result = {
-            "last_name":  str(data.get("last_name",  last_name)),
-            "first_name": str(data.get("first_name", "")),
-            "title":      str(data.get("title",      "")),
-            "ug":         int(data.get("ug",      0) or 0),
-            "grad":       int(data.get("grad",    0) or 0),
-            "ms":         int(data.get("ms",      0) or 0),
-            "phd":        int(data.get("phd",     0) or 0),
-            "grants":     int(data.get("grants",  0) or 0),
-            "ch_co":      int(data.get("ch_co",   0) or 0),
-            "cp":         int(data.get("cp",      0) or 0),
-            "journal":    int(data.get("journal", 0) or 0),
-        }
-        for cr in custom_rules:
-            result[cr["name"]] = int(data.get(cr["name"], 0) or 0)
-        return result
+    results = {}
+    for cr in custom_rules:
+        section  = cr.get("section", "").strip()
+        rule_type = cr.get("rule_type", "")
+        keywords  = cr.get("keywords", "")
+        year      = cr.get("year", "")
+        name      = cr["name"]
 
-    except json.JSONDecodeError as e:
-        st.warning(f"⚠️ {last_name}: AI invalid JSON — {e}. Falling back.")
-        return None
-    except Exception as e:
-        st.warning(f"⚠️ {last_name}: AI failed — {e}. Falling back.")
-        return None
+        # Extract just the relevant section text to keep prompt short
+        sec_text = cv_text
+        if section:
+            lines    = cv_text.split("\n")
+            in_sec   = False
+            sec_lines = []
+            for line in lines:
+                if section.lower() in line.lower():
+                    in_sec = True; continue
+                if in_sec and re.match(r'^[A-Z][A-Z\s]{5,}$', line.strip()) and section.lower() not in line.lower():
+                    in_sec = False
+                if in_sec:
+                    sec_lines.append(line)
+            if sec_lines:
+                sec_text = "\n".join(sec_lines[:60])
+
+        # Build a simple, direct prompt
+        if "all entries" in rule_type.lower():
+            instruction = "Count the total number of entries (numbered items or bullet points)."
+        elif "year" in rule_type.lower() and year:
+            instruction = f"Count entries that mention the year {year}."
+        elif "NOT" in rule_type:
+            instruction = f"Count entries that do NOT contain the word '{keywords}'."
+        elif "ANY" in rule_type:
+            instruction = f"Count entries that contain ANY of these words: {keywords}."
+        elif "ALL" in rule_type:
+            instruction = f"Count entries that contain ALL of these words: {keywords}."
+        else:
+            instruction = f"Count entries that contain '{keywords}'."
+
+        prompt = (f"You are counting items in a faculty CV section.\n\n"
+                  f"Section text:\n{sec_text[:2000]}\n\n"
+                  f"Task: {instruction}\n\n"
+                  f"Reply with a single integer only. No explanation.")
+
+        try:
+            reply = _call_ai(prompt, api_key, base_url, model)
+            if reply:
+                # Extract first integer from response
+                nums = re.findall(r'\d+', reply.strip())
+                results[name] = int(nums[0]) if nums else 0
+            else:
+                results[name] = None  # signal fallback needed
+        except Exception:
+            results[name] = None
+
+    return results
 
 
 # ── Default rules text ─────────────────────────────────────────────────────────
@@ -539,11 +533,12 @@ if run_btn and uploaded_files:
                         except Exception: pass
                     ai_res = extract_with_ai(
                         st.session_state.get("rules_text", DEFAULT_RULES_TEXT),
-                        last_name, cv_text_full, cv_text_ai, "",
+                        last_name, cv_text_ai,
                         custom_rules, ai_api_key,
                         ai_base_url or None, ai_model or "protected.gpt-5")
                     for cr in custom_rules:
-                        r[cr["name"]] = (ai_res.get(cr["name"], 0) if ai_res
+                        ai_val = (ai_res or {}).get(cr["name"])
+                        r[cr["name"]] = (ai_val if ai_val is not None
                                          else _run_custom_rule(cv_text_full, cr))
                 else:
                     for cr in custom_rules:
