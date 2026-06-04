@@ -587,34 +587,45 @@ if run_btn and uploaded_files:
             if r is None:
                 continue
 
-            # Custom rules
+            # Custom rules — search ALL uploaded PDFs for this faculty member
             if custom_rules:
-                cv_text_full = all_far_data.get(last_name, (None, ""))[1]
-                # Standard rule types always use regex (reliable, no truncation, no API needed)
-                # AI is only used when user writes a plain-English count instruction
+                all_texts = {}
+                # FAR text
+                far_txt = all_far_data.get(last_name, (None, ""))[1]
+                if far_txt:
+                    all_texts["FAR"] = far_txt
+                # Every other PDF whose filename contains the last name
+                for pdf_path in glob.glob(os.path.join(tmpdir, "*.pdf")):
+                    fname = os.path.basename(pdf_path)
+                    if last_name.lower() in fname.lower() and "F180Vita" not in fname:
+                        try:
+                            all_texts[fname] = rr.pdf_full_text(pdf_path)
+                        except Exception:
+                            pass
+
                 std_types = {"Count all entries in section",
                              "Count entries containing keyword",
                              "Count entries from a specific year",
                              "Count entries matching ALL keywords",
                              "Count entries matching ANY keyword",
                              "Count entries NOT containing keyword"}
+
                 for cr in custom_rules:
                     needs_ai = ai_api_key and cr.get("rule_type") not in std_types
                     if needs_ai:
-                        cv_path = os.path.join(tmpdir, f"{last_name} CV.pdf")
-                        cv_text_ai = cv_text_full
-                        if os.path.exists(cv_path):
-                            try: cv_text_ai = rr.pdf_full_text(cv_path)
-                            except Exception: pass
+                        best_text = max(all_texts.values(), key=len) if all_texts else ""
                         ai_res = extract_with_ai(
                             st.session_state.get("rules_text", DEFAULT_RULES_TEXT),
-                            last_name, cv_text_ai,
+                            last_name, best_text,
                             [cr], ai_api_key,
                             ai_base_url or None, ai_model or "gpt-4o")
                         ai_val = (ai_res or {}).get(cr["name"])
-                        r[cr["name"]] = ai_val if ai_val is not None else _run_custom_rule(cv_text_full, cr)
+                        r[cr["name"]] = ai_val if ai_val is not None else max(
+                            (_run_custom_rule(txt, cr) for txt in all_texts.values()), default=0)
                     else:
-                        r[cr["name"]] = _run_custom_rule(cv_text_full, cr)
+                        # Run on every PDF and take the max
+                        counts = [_run_custom_rule(txt, cr) for txt in all_texts.values()]
+                        r[cr["name"]] = max(counts) if counts else 0
 
             results.append(r)
             st.write(f"✅ **{last_name}** — UG={r['ug']} Grad={r['grad']} "
