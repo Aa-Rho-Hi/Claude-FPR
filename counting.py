@@ -255,9 +255,18 @@ def segment_entries(section_text: str) -> tuple[List[str], str, str]:
 # 3. Filters
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _years_in(text: str) -> List[int]:
+    """All 19xx/20xx years mentioned in an entry."""
+    return [int(y) for y in re.findall(r'\b(?:19|20)\d{2}\b', text)]
+
+
 def _keyword_filter(entries: List[str], rule_type: str, keywords: List[str],
                     year: str) -> List[str]:
     kws = [k.lower() for k in keywords if k]
+    try:
+        threshold = int(year) if year else None
+    except ValueError:
+        threshold = None
     out = []
     for e in entries:
         el = e.lower()
@@ -267,6 +276,12 @@ def _keyword_filter(entries: List[str], rule_type: str, keywords: List[str],
             ok = bool(kws) and kws[0] in el
         elif rule_type == "year":
             ok = bool(year) and year in el
+        elif rule_type == "after_year":
+            yrs = _years_in(e)
+            ok = threshold is not None and bool(yrs) and max(yrs) > threshold
+        elif rule_type == "before_year":
+            yrs = _years_in(e)
+            ok = threshold is not None and bool(yrs) and min(yrs) < threshold
         elif rule_type == "all_of":
             ok = bool(kws) and all(k in el for k in kws)
         elif rule_type == "any_of":

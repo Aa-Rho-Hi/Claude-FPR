@@ -22,6 +22,8 @@ _RULE_CODE = {
     "Count all entries in section":         "all",
     "Count entries containing keyword":     "contains",
     "Count entries from a specific year":   "year",
+    "Count entries after year":             "after_year",
+    "Count entries before year":            "before_year",
     "Count entries matching ALL keywords":  "all_of",
     "Count entries matching ANY keyword":   "any_of",
     "Count entries NOT containing keyword": "excludes",
@@ -121,10 +123,24 @@ def _parse_custom_rules(text):
         elif cl.startswith("contains:"):
             rule_type, keywords, year = "Count entries containing keyword", count.split(":",1)[1].strip(), ""
         else:
-            # Not a standard structural/keyword instruction → semantic AI rule.
-            # rule_type is intentionally NON-standard so the run loop routes it to
-            # the AI per-entry classifier; count_raw carries the plain-English text.
-            rule_type, keywords, year = "AI instruction", "", ""
+            # Try to satisfy common plain-English phrasings DETERMINISTICALLY (no
+            # API key needed). Only genuinely semantic instructions fall through
+            # to the AI per-entry classifier.
+            m_after  = re.search(r'\b(?:after|since|from|>=?)\s*((?:19|20)\d{2})', cl)
+            m_before = re.search(r'\b(?:before|prior to|earlier than|<=?)\s*((?:19|20)\d{2})', cl)
+            m_year   = re.fullmatch(r'(?:in\s+|for\s+|year\s+)?((?:19|20)\d{2})', cl.strip())
+            if m_before:
+                rule_type, keywords, year = "Count entries before year", "", m_before.group(1)
+            elif m_after:
+                rule_type, keywords, year = "Count entries after year", "", m_after.group(1)
+            elif m_year:
+                rule_type, keywords, year = "Count entries from a specific year", "", m_year.group(1)
+            elif len(count.split()) == 1:
+                # A single bare word → keyword contains (deterministic, no AI).
+                rule_type, keywords, year = "Count entries containing keyword", count, ""
+            else:
+                # Genuinely semantic → AI per-entry classifier (needs an API key).
+                rule_type, keywords, year = "AI instruction", "", ""
 
         rules.append({"name": name, "section": section,
                       "rule_type": rule_type, "keywords": keywords, "year": year,
@@ -618,6 +634,8 @@ if run_btn and uploaded_files:
                 std_types = {"Count all entries in section",
                              "Count entries containing keyword",
                              "Count entries from a specific year",
+                             "Count entries after year",
+                             "Count entries before year",
                              "Count entries matching ALL keywords",
                              "Count entries matching ANY keyword",
                              "Count entries NOT containing keyword"}
