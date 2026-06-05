@@ -54,28 +54,59 @@ def _run_custom_rule(cv_text, cr):
     return counting.run_rule(cv_text, rule).count
 
 
-def _parse_custom_rules(text):
-    rules  = []
-    marker = "ADD YOUR RULES HERE"
-    idx    = text.upper().find(marker.upper())
-    if idx >= 0:
-        text = text[idx + len(marker):]
+def _strip_comment(line):
+    """Remove a single leading comment marker (#, //, *) so a user who copies a
+    commented example without deleting the # still gets a working rule."""
+    return re.sub(r'^\s*(?:#+|//|\*)\s?', '', line)
 
-    blocks = re.split(r'(?im)^\s*rule\s+name\s*:', text)
-    for block in blocks[1:]:
-        lines   = [l.strip() for l in block.strip().split("\n") if l.strip()]
-        if not lines: continue
-        name    = lines[0].strip()
-        section = ""
-        count   = ""
+
+# Anchors a rule block. Accepts "Rule name:", "Rule:", "Name:".
+_RULE_ANCHOR = re.compile(r'(?im)^\s*(?:rule\s+name|rule|name)\s*:')
+
+
+def _parse_rule_blocks(text):
+    """Split comment-free `text` into (name, section, count) tuples."""
+    out = []
+    for block in _RULE_ANCHOR.split(text)[1:]:
+        lines = [l.strip() for l in block.strip().split("\n") if l.strip()]
+        if not lines:
+            continue
+        name, section, count = lines[0].strip(), "", ""
         for line in lines[1:]:
             ll = line.lower()
-            if ll.startswith("look in:"):
+            if ll.startswith("look in:") or ll.startswith("section:") or ll.startswith("in:"):
                 section = line.split(":", 1)[1].strip()
-            elif ll.startswith("count:"):
+            elif ll.startswith("count:") or ll.startswith("counts:"):
                 count = line.split(":", 1)[1].strip()
-        if not name or not count: continue
+        if not name or not count:
+            continue
+        if name.startswith("[") or count.startswith("["):   # skip help-text template
+            continue
+        out.append((name, section, count))
+    return out
 
+
+def _parse_custom_rules(text):
+    """
+    Robust to real-world input: accepts "Rule name:"/"Rule:"/"Name:" and
+    "Look in:"/"Section:"/"In:"; tolerates leftover comment markers (#, //);
+    and if nothing is found after the 'ADD YOUR RULES HERE' marker, falls back
+    to scanning the whole document (ignoring commented example lines).
+    """
+    rules = []
+
+    marker = "ADD YOUR RULES HERE"
+    idx = text.upper().find(marker.upper())
+    region = text[idx + len(marker):] if idx >= 0 else text
+    region_nc = "\n".join(_strip_comment(l) for l in region.split("\n"))
+    parsed = _parse_rule_blocks(region_nc)
+
+    if not parsed:   # user may have typed above the marker; scan all, drop comments
+        no_comments = "\n".join(l for l in text.split("\n")
+                                if not re.match(r'^\s*(?:#|//|\*)', l))
+        parsed = _parse_rule_blocks(no_comments)
+
+    for name, section, count in parsed:
         cl = count.lower()
         if cl.startswith("all entries") or cl == "all":
             rule_type, keywords, year = "Count all entries in section", "", ""
@@ -453,7 +484,14 @@ with st.expander("📝 Rules Editor", expanded=False):
             st.session_state["rules_text"]   = rules_text
             st.session_state["custom_rules"] = _parse_custom_rules(rules_text)
             n = len(st.session_state["custom_rules"])
-            st.success(f"✅ {n} custom rule{'s' if n!=1 else ''} saved.")
+            if n:
+                st.success(f"✅ {n} custom rule{'s' if n!=1 else ''} saved.")
+            else:
+                st.warning(
+                    "⚠️ Saved, but **0 custom rules** were recognized. Each rule needs a "
+                    "`Rule name:` line and a `Count:` line, e.g.:\n\n"
+                    "```\nRule name:  Patents Filed\nLook in:    Patents\nCount:      all entries\n```\n\n"
+                    "If you copied an example, delete the leading `#`.")
     with c2:
         if st.button("↩️ Reset"):
             st.session_state["rules_text"]   = DEFAULT_RULES_TEXT
