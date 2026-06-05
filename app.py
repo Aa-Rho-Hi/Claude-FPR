@@ -15,88 +15,43 @@ except Exception as e:
     st.error(f"❌ Failed to load run_rules.py: {e}")
     st.stop()
 
+import counting  # deterministic, auditable entry-counting engine
+
+# Map this app's long rule_type labels onto the engine's short filter codes.
+_RULE_CODE = {
+    "Count all entries in section":         "all",
+    "Count entries containing keyword":     "contains",
+    "Count entries from a specific year":   "year",
+    "Count entries matching ALL keywords":  "all_of",
+    "Count entries matching ANY keyword":   "any_of",
+    "Count entries NOT containing keyword": "excludes",
+}
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Helper functions
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _run_custom_rule(cv_text, cr):
-    section   = cr.get("section", "").strip().lower()
-    rule_type = cr.get("rule_type", "Count entries containing keyword")
-    keywords  = [k.strip().lower() for k in cr.get("keywords", "").split(",") if k.strip()]
-    year_str  = str(cr.get("year", "")).strip()
+    """Count entries for a standard (deterministic) custom rule.
 
-    # Extract section — robust for any CV format
-    lines     = cv_text.split("\n")
-    in_sec    = not section
-    sec_lines = []
+    Delegates to the counting engine, which keeps segmentation, filtering, and
+    counting separate: the section is sliced with robust header detection, split
+    into discrete entries by a detector cascade (numbered / bracketed / bullets /
+    blank-line blocks / flagged fallback) that merges multi-line entries, and the
+    count is always len(matched). This fixes the multi-line-wrap over-count and
+    the section-bleed over-count that line-based counting produced.
 
-    def _is_section_header(line, keyword):
-        """True if this line looks like a section header containing the keyword."""
-        s = line.strip()
-        if not keyword: return False
-        if keyword not in s.lower(): return False
-        # Accept: short lines, ALL CAPS lines, lines with no punctuation mid-sentence
-        return len(s) < 80 or s.isupper() or re.match(r'^[A-Z][A-Za-z\s\-/&]+$', s)
-
-    def _is_new_major_section(line, current_keyword):
-        """True if this line starts a NEW section (not the current one)."""
-        s = line.strip()
-        if not s or current_keyword in s.lower(): return False
-        # All-caps header, or title-case short line with no numbers
-        return (s.isupper() and len(s) > 3) or \
-               (re.match(r'^[A-Z][A-Za-z\s\-/&]{4,}$', s) and len(s) < 60) or \
-               bool(re.match(r'^[A-Z][A-Z\s]{4,}$', s))
-
-    for line in lines:
-        if section and _is_section_header(line, section):
-            in_sec = True; continue
-        if in_sec and section and _is_new_major_section(line, section):
-            in_sec = False
-        if in_sec:
-            sec_lines.append(line.strip())
-
-    # If section not found, search entire document
-    if not sec_lines and section:
-        sec_lines = [l.strip() for l in lines if l.strip()]
-
-    sec_text = "\n".join(sec_lines)
-
-    # Detect entry format — try multiple patterns in priority order
-    entry_patterns = [
-        re.compile(r'(?m)^\[\w{1,3}\d+\]'),      # [P1] [C1] [J1] bracket labels
-        re.compile(r'(?m)^\d+[\.\)]\s'),           # 1. or 1)
-        re.compile(r'(?m)^[•\-\*]\s'),             # bullets
-    ]
-
-    splits = []
-    for pat in entry_patterns:
-        matches = list(pat.finditer(sec_text))
-        if len(matches) >= 2:
-            splits = [m.start() for m in matches]
-            break
-
-    if splits:
-        entries = [sec_text[splits[i]: splits[i+1] if i+1 < len(splits) else len(sec_text)]
-                   for i in range(len(splits))]
-    else:
-        entries = [l for l in sec_lines if l]
-
-    count = 0
-    for entry in entries:
-        el = entry.lower()
-        if rule_type == "Count all entries in section":
-            count += 1
-        elif rule_type == "Count entries containing keyword":
-            if keywords and keywords[0] in el: count += 1
-        elif rule_type == "Count entries from a specific year":
-            if year_str and year_str in el: count += 1
-        elif rule_type == "Count entries matching ALL keywords":
-            if keywords and all(k in el for k in keywords): count += 1
-        elif rule_type == "Count entries matching ANY keyword":
-            if keywords and any(k in el for k in keywords): count += 1
-        elif rule_type == "Count entries NOT containing keyword":
-            if keywords and keywords[0] not in el: count += 1
-    return count
+    Same signature and int return as before, so the crawl-all-PDFs / max-count
+    loop keeps working unchanged.
+    """
+    rule = {
+        "section":   cr.get("section", ""),
+        "mode":      "regex",
+        "rule_type": _RULE_CODE.get(cr.get("rule_type", ""), "contains"),
+        "keywords":  [k.strip() for k in str(cr.get("keywords", "")).split(",") if k.strip()],
+        "year":      str(cr.get("year", "")).strip(),
+    }
+    return counting.run_rule(cv_text, rule).count
 
 
 def _parse_custom_rules(text):
@@ -135,7 +90,10 @@ def _parse_custom_rules(text):
         elif cl.startswith("contains:"):
             rule_type, keywords, year = "Count entries containing keyword", count.split(":",1)[1].strip(), ""
         else:
-            rule_type, keywords, year = "Count entries containing keyword", count, ""
+            # Not a standard structural/keyword instruction → semantic AI rule.
+            # rule_type is intentionally NON-standard so the run loop routes it to
+            # the AI per-entry classifier; count_raw carries the plain-English text.
+            rule_type, keywords, year = "AI instruction", "", ""
 
         rules.append({"name": name, "section": section,
                       "rule_type": rule_type, "keywords": keywords, "year": year,
@@ -233,74 +191,90 @@ def _call_ai(prompt, api_key, base_url, model):
     return "".join(parts).strip() or None
 
 
+def _ai_classify_entries(entries, instruction, api_key, base_url, model, batch_size=15):
+    """
+    Ask the model to judge EACH entry match/no-match against `instruction`, then
+    count the matches in Python. The model never returns a total — this is what
+    eliminates the large-list miscount (13, then 36, then 55…), because nothing
+    ever holds a running tally over a long list. Uses this app's own _call_ai so
+    the configured endpoint / base_url / model (incl. reasoning models) still apply.
+    Returns list[bool] aligned to `entries`, or raises on an unusable response.
+    """
+    flags = [False] * len(entries)
+    for start in range(0, len(entries), batch_size):
+        idxs = list(range(start, min(start + batch_size, len(entries))))
+        listing = "\n".join(
+            f"[{j}] " + re.sub(r'\s+', ' ', entries[g])[:500] for j, g in enumerate(idxs))
+        prompt = (
+            "You are labelling CV entries. For EACH entry below, decide whether it "
+            f"satisfies this condition:\n\n  CONDITION: {instruction}\n\n"
+            "Judge each entry independently and literally. Do NOT count or summarise. "
+            "Return ONLY a JSON array, one object per entry, like "
+            '[{"id":0,"match":true},{"id":1,"match":false}].\n\n'
+            f"ENTRIES:\n{listing}")
+        reply = _call_ai(prompt, api_key, base_url, model)
+        if not reply:
+            raise RuntimeError("empty AI reply")
+        mt = re.search(r'\[.*\]', reply, re.DOTALL)
+        if not mt:
+            raise ValueError("no JSON array in AI reply")
+        for item in json.loads(mt.group(0)):
+            try:
+                i = int(item.get("id"))
+            except (TypeError, ValueError):
+                continue
+            if 0 <= i < len(idxs):
+                flags[idxs[i]] = bool(item.get("match"))
+    return flags
+
+
 def extract_with_ai(rules_text, last_name, cv_text,
                     custom_rules, api_key, base_url=None, model="gpt-4o"):
     """
-    Run each custom rule independently with a minimal focused prompt.
-    Returns dict of {rule_name: count} or None on total failure.
+    Run each custom rule with a per-entry AI classifier. The section is segmented
+    deterministically (counting.segment_entries), the model judges each entry,
+    and PYTHON counts the matches. Returns {rule_name: count} (int) or
+    {rule_name: None} on failure so the caller can fall back to the deterministic
+    engine.
     """
     if not custom_rules:
         return {}
 
     results = {}
     for cr in custom_rules:
-        section  = cr.get("section", "").strip()
+        name      = cr["name"]
+        section   = cr.get("section", "")
         rule_type = cr.get("rule_type", "")
         keywords  = cr.get("keywords", "")
         year      = cr.get("year", "")
-        name      = cr["name"]
 
-        # Extract the relevant section — send the full section, not truncated
-        sec_text = cv_text
-        if section:
-            lines     = cv_text.split("\n")
-            in_sec    = False
-            sec_lines = []
-            for line in lines:
-                if section.lower() in line.lower() and len(line.strip()) < 60:
-                    in_sec = True; continue
-                if in_sec and re.match(r'^[A-Z][A-Z\s]{4,}$', line.strip()) \
-                        and section.lower() not in line.lower():
-                    in_sec = False
-                if in_sec:
-                    sec_lines.append(line)
-            if sec_lines:
-                sec_text = "\n".join(sec_lines)
-
-        # Build the instruction from the rule
-        if cr.get("count_raw"):               # user typed plain English in Count field
-            instruction = cr["count_raw"]
+        # The condition each entry is judged against (plain-English when provided).
+        raw = (cr.get("count_raw") or "").strip()
+        if raw:
+            instruction = raw
         elif "all entries" in rule_type.lower():
-            instruction = ("Count every distinct entry. Entries may be numbered (1. 2. 3.), "
-                           "use bracket labels ([P1] [P2]…), bullets, or dashes. "
-                           "Each new entry that starts a new item counts as one.")
+            instruction = "this is a distinct entry in the section"
         elif "year" in rule_type.lower() and year:
-            instruction = f"Count entries that mention the year {year}."
+            instruction = f"the entry mentions the year {year}"
         elif "NOT" in rule_type:
-            instruction = f"Count entries that do NOT contain '{keywords}'."
+            instruction = f"the entry does NOT contain '{keywords}'"
         elif "ANY" in rule_type:
-            instruction = f"Count entries containing ANY of: {keywords}."
+            instruction = f"the entry contains ANY of: {keywords}"
         elif "ALL" in rule_type:
-            instruction = f"Count entries containing ALL of: {keywords}."
+            instruction = f"the entry contains ALL of: {keywords}"
         else:
-            instruction = f"Count entries containing '{keywords}'."
-
-        prompt = (f"You are a precise data-extraction assistant counting items in a faculty CV.\n\n"
-                  f"=== SECTION: {section or 'Full document'} ===\n"
-                  f"{sec_text}\n\n"
-                  f"=== TASK ===\n{instruction}\n\n"
-                  f"Reply with a SINGLE INTEGER only. No explanation, no prose.")
+            instruction = f"the entry contains '{keywords}'"
 
         try:
-            reply = _call_ai(prompt, api_key, base_url, model)
-            if reply:
-                # Extract first integer from response
-                nums = re.findall(r'\d+', reply.strip())
-                results[name] = int(nums[0]) if nums else 0
-            else:
-                results[name] = None  # signal fallback needed
+            body, _w = counting.extract_section(cv_text, section)
+            entries, _method, _conf = counting.segment_entries(body)
+            if not entries:
+                results[name] = 0
+                continue
+            flags = _ai_classify_entries(entries, instruction, api_key, base_url, model)
+            results[name] = sum(1 for f in flags if f)   # Python counts the matches
         except Exception:
-            results[name] = None
+            results[name] = None  # signal fallback to the deterministic engine
 
     return results
 
