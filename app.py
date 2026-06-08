@@ -402,13 +402,6 @@ with st.sidebar:
     st.header("⚙️ Settings")
     output_filename = st.text_input("Output filename", value="far_extraction_output.xlsx")
 
-    append_file = st.file_uploader(
-        "Append to existing output (optional)", type=["xlsx"], key="append_xlsx",
-        help="Process in batches: upload a previously downloaded results Excel and "
-             "this run's faculty will be added to it (duplicates updated, not doubled).")
-    if append_file:
-        st.caption("➕ Results will be merged into the uploaded Excel.")
-
     st.markdown("---")
     st.markdown("#### 🤖 AI Extraction")
     st.caption(
@@ -450,6 +443,15 @@ if uploaded_files:
     with st.expander("Show uploaded files"):
         for f in uploaded_files:
             st.text(f"{f.name}  ({f.size/1024:.1f} KB)")
+
+st.markdown("**Append to an existing results Excel (optional)**")
+append_file = st.file_uploader(
+    "Upload a previously downloaded output Excel to add this run's faculty to it",
+    type=["xlsx"], key="append_xlsx",
+    help="For batch processing: run some files, download the Excel, then upload it here "
+         "next time and the new faculty get merged in (duplicates are updated, not doubled).")
+if append_file:
+    st.info(f"➕ This run will be appended to **{append_file.name}**.")
 
 # ── 2. Faculty selection ───────────────────────────────────────────────────────
 st.subheader("2. Select Faculty")
