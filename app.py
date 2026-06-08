@@ -17,6 +17,25 @@ except Exception as e:
 
 import counting  # deterministic, auditable entry-counting engine
 
+
+def _merge_with_existing(new_df, prev_bytes, sheet_name, key_cols):
+    """Append new rows to a previously-downloaded output sheet, de-duping by
+    faculty (new run wins). Lets users process in batches (e.g. 5 files at a
+    time) and accumulate everyone into one workbook."""
+    if not prev_bytes:
+        return new_df
+    import io as _io2
+    import pandas as _pd
+    try:
+        prev_df = _pd.read_excel(_io2.BytesIO(prev_bytes), sheet_name=sheet_name)
+    except Exception:
+        return new_df  # sheet missing / unreadable → just use the new data
+    combined = _pd.concat([prev_df, new_df], ignore_index=True)
+    keys = [k for k in key_cols if k in combined.columns]
+    if keys:
+        combined = combined.drop_duplicates(subset=keys, keep="last").reset_index(drop=True)
+    return combined
+
 # Map this app's long rule_type labels onto the engine's short filter codes.
 _RULE_CODE = {
     "Count all entries in section":         "all",
@@ -383,6 +402,13 @@ with st.sidebar:
     st.header("⚙️ Settings")
     output_filename = st.text_input("Output filename", value="far_extraction_output.xlsx")
 
+    append_file = st.file_uploader(
+        "Append to existing output (optional)", type=["xlsx"], key="append_xlsx",
+        help="Process in batches: upload a previously downloaded results Excel and "
+             "this run's faculty will be added to it (duplicates updated, not doubled).")
+    if append_file:
+        st.caption("➕ Results will be merged into the uploaded Excel.")
+
     st.markdown("---")
     st.markdown("#### 🤖 AI Extraction")
     st.caption(
@@ -714,14 +740,25 @@ if run_btn and uploaded_files:
                 submission_rows = [{"Last name": r["last_name"], "First name": r["first_name"],
                                     "CV": 1, "FPR": 1} for r in results]
 
+                # If the user uploaded a previous output, append this batch to it
+                # (de-duped by faculty) so batches accumulate in one workbook.
+                _prev = append_file.getvalue() if append_file else None
+                ar_df  = _merge_with_existing(pd.DataFrame(ar_rows),  _prev, "AR Memo Data", ["faculty_last_name"])
+                grants_df = _merge_with_existing(pd.DataFrame(grants_rows), _prev, "Grants",     ["Last name"])
+                service_df = _merge_with_existing(pd.DataFrame(service_rows), _prev, "Service",  ["faculty_last_name"])
+                submission_df = _merge_with_existing(pd.DataFrame(submission_rows), _prev, "Submission", ["Last name"])
+
                 buf = _io.BytesIO()
                 with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-                    pd.DataFrame(ar_rows).to_excel(writer, sheet_name="AR Memo Data",   index=False)
-                    pd.DataFrame(grants_rows).to_excel(writer, sheet_name="Grants",     index=False)
-                    pd.DataFrame(service_rows).to_excel(writer, sheet_name="Service",   index=False)
-                    pd.DataFrame(submission_rows).to_excel(writer, sheet_name="Submission", index=False)
+                    ar_df.to_excel(writer,         sheet_name="AR Memo Data", index=False)
+                    grants_df.to_excel(writer,     sheet_name="Grants",       index=False)
+                    service_df.to_excel(writer,    sheet_name="Service",      index=False)
+                    submission_df.to_excel(writer, sheet_name="Submission",   index=False)
 
                 excel_bytes = buf.getvalue()
+                if _prev:
+                    st.info(f"➕ Appended to your uploaded Excel — combined total: "
+                            f"{len(ar_df)} faculty in the AR Memo Data sheet.")
                 st.session_state["results"]        = results
                 st.session_state["excel_bytes"]    = excel_bytes
                 st.session_state["excel_filename"] = output_filename

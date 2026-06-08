@@ -115,6 +115,7 @@ def extract_section(cv_text: str, section: str) -> tuple[str, List[str]]:
         return cv_text, warnings
 
     target = _norm(section)
+    target_toks = [t for t in target.split() if len(t) >= 3]
     lines = cv_text.split("\n")
 
     # Locate all header lines.
@@ -123,45 +124,56 @@ def extract_section(cv_text: str, section: str) -> tuple[str, List[str]]:
         if _is_header_line(ln, lines[i + 1] if i + 1 < len(lines) else "")
     ]
 
-    # Score header matches against the target.
-    best_i, best_score = None, 0
+    def _stem_overlap(a_toks, b_toks):
+        """Count target tokens that stem-match (plural/singular tolerant) a header token."""
+        n = 0
+        for a in a_toks:
+            for b in b_toks:
+                if a == b or a.startswith(b[:4]) or b.startswith(a[:4]):
+                    n += 1
+                    break
+        return n
+
+    # Score header matches against the target, most-specific first.
+    best_i, best_score = None, 0.0
     for i in header_idx:
         h = _norm(lines[i])
         if not h:
             continue
+        h_toks = [t for t in h.split() if len(t) >= 3]
         if h == target:
-            score = 4
+            score = 5.0
         elif h.startswith(target) or target.startswith(h):
-            score = 3
+            score = 4.0
         elif re.search(r'\b' + re.escape(target) + r'\b', h) or \
                 re.search(r'\b' + re.escape(h) + r'\b', target):
-            score = 2
+            score = 3.0
         elif target in h:
-            score = 1
+            score = 2.0
+        elif target_toks and h_toks:
+            # Fuzzy: fraction of target tokens that stem-match a header token.
+            overlap = _stem_overlap(target_toks, h_toks)
+            score = 1.5 * (overlap / len(target_toks)) if overlap else 0.0
         else:
-            score = 0
+            score = 0.0
         if score > best_score:
             best_score, best_i = score, i
 
-    if best_i is not None:
-        # Body runs until the next header line.
+    # Require a real match (a shared stem token at least). Don't accept noise.
+    if best_i is not None and best_score >= 0.7:
         nxt = next((j for j in header_idx if j > best_i), len(lines))
         body = "\n".join(lines[best_i + 1:nxt])
         if not body.strip():
             warnings.append(f"Section '{section}' matched a header but the body was empty.")
         return body, warnings
 
-    # Fallback: substring, but only on short (header-like) lines to avoid
-    # matching the word inside an entry body.
-    for i, ln in enumerate(lines):
-        if target in _norm(ln) and len(ln.split()) <= 8:
-            nxt = next((j for j in header_idx if j > i), len(lines))
-            warnings.append(f"Section '{section}' not found as a clean header; "
-                            f"used a relaxed match on line {i + 1}.")
-            return "\n".join(lines[i + 1:nxt]), warnings
-
-    warnings.append(f"Section '{section}' not found — counted across the whole document.")
-    return cv_text, warnings
+    # Section explicitly requested but NOT found. Fail SAFE: do not count the
+    # whole document (that produces nonsense like counting every publication).
+    # Return empty so the count is 0 and flag it loudly for review.
+    warnings.append(f"Section '{section}' was not found in this document — "
+                    f"returning 0 rather than counting the whole CV. "
+                    f"Check the exact section heading.")
+    return "", warnings
 
 
 # ══════════════════════════════════════════════════════════════════════════════
