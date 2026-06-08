@@ -404,20 +404,48 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("#### 🤖 AI Extraction")
-    st.caption(
-        "Standard fields always use the rule-based pipeline. "
-        "Provide an API key to power **custom rules** with AI."
-    )
-    ai_api_key  = st.text_input("AI API Key", type="password",
-                                placeholder="sk-… or your TAMU key")
-    ai_base_url = st.text_input("API Base URL (optional)",
-                                placeholder="https://chat-api.tamu.ai/openai")
-    ai_model    = st.text_input("Model name", value="protected.gpt-5")
 
-    if ai_api_key:
+    # Backend-configured credentials. Set these as environment variables (or
+    # Streamlit secrets) in Cloud Run so end users never need a key.
+    # SECURITY: never hardcode the key here — this repo is public.
+    def _secret(name):
+        try:
+            if name in st.secrets:
+                return st.secrets[name]
+        except Exception:
+            pass
+        return os.environ.get(name)
+
+    _backend_key   = _secret("AI_API_KEY") or _secret("OPENAI_API_KEY") or _secret("ANTHROPIC_API_KEY")
+    _backend_base  = _secret("AI_BASE_URL") or ""
+    _backend_model = _secret("AI_MODEL") or "protected.gpt-5"
+
+    if _backend_key:
+        # Key is configured on the server: nothing for the user to do.
         st.success("🟢 AI custom rules enabled")
+        st.caption("AI is set up for you — plain-English custom rules just work. No key needed.")
+        with st.expander("Advanced (optional): override AI settings"):
+            _ovr_key    = st.text_input("AI API Key override", type="password",
+                                        placeholder="leave blank to use the configured key")
+            ai_base_url = st.text_input("API Base URL", value=_backend_base)
+            ai_model    = st.text_input("Model name", value=_backend_model)
+        ai_api_key = (_ovr_key.strip() if _ovr_key else "") or _backend_key
     else:
-        st.info("🔵 Rule-based extraction")
+        st.caption("Standard fields always use the rule-based pipeline. "
+                   "Provide an API key to power **custom rules** with AI.")
+        ai_api_key  = st.text_input("AI API Key", type="password",
+                                    placeholder="sk-… or your TAMU key")
+        ai_base_url = st.text_input("API Base URL (optional)", value=_backend_base,
+                                    placeholder="https://chat-api.tamu.ai/openai")
+        ai_model    = st.text_input("Model name", value=_backend_model)
+        if ai_api_key:
+            st.success("🟢 AI custom rules enabled")
+        else:
+            st.info("🔵 Rule-based extraction")
+
+    # Normalize: fall back to backend values if a field was left blank.
+    ai_base_url = (ai_base_url or _backend_base) or None
+    ai_model    = ai_model or _backend_model
 
     st.markdown("---")
     st.markdown("**Expected file naming:**")
