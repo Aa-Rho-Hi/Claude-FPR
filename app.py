@@ -417,7 +417,8 @@ with st.sidebar:
         return os.environ.get(name)
 
     _backend_key   = _secret("AI_API_KEY") or _secret("OPENAI_API_KEY") or _secret("ANTHROPIC_API_KEY")
-    _backend_base  = _secret("AI_BASE_URL") or ""
+    # Sensible defaults so the ONLY variable you must set is AI_API_KEY.
+    _backend_base  = _secret("AI_BASE_URL") or "https://chat-api.tamu.ai/openai"
     _backend_model = _secret("AI_MODEL") or "protected.gpt-5"
 
     if _backend_key:
@@ -431,8 +432,13 @@ with st.sidebar:
             ai_model    = st.text_input("Model name", value=_backend_model)
         ai_api_key = (_ovr_key.strip() if _ovr_key else "") or _backend_key
     else:
+        # Diagnostic: the app is NOT seeing a key in the server environment.
         st.caption("Standard fields always use the rule-based pipeline. "
                    "Provide an API key to power **custom rules** with AI.")
+        st.warning("No server key detected. The app looked for an `AI_API_KEY` "
+                   "environment variable and did not find one. If you set it in "
+                   "Cloud Run, deploy a new revision and hard-refresh this page "
+                   "(the variable name must be exactly `AI_API_KEY`).")
         ai_api_key  = st.text_input("AI API Key", type="password",
                                     placeholder="sk-… or your TAMU key")
         ai_base_url = st.text_input("API Base URL (optional)", value=_backend_base,
